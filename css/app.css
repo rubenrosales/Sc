@@ -264,3 +264,15 @@ dialog#sheet { overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-
 body:has(dialog[open]) { overflow: hidden; }
 #linkout { font-family: ui-monospace, monospace; font-size: 13px; word-break: break-all; margin-top: 8px; }
 .sheet .x { position: sticky; top: 8px; float: right; margin: -4px -8px 0 0; z-index: 2; box-shadow: 0 1px 4px rgba(0,0,0,.15); }
+
+/* full details */
+.sheet .desc { max-height: none; white-space: normal; line-height: 1.5; }
+.sheet .back { display: block; margin: 0 40px 6px 0; font-size: .88rem; text-align: left; }
+.facts { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+.fact { font-size: .8rem; background: var(--panel2); border: 1px solid var(--line); border-radius: 99px; padding: 3px 10px; }
+.fact.tag { color: var(--muted); }
+.people { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.people li { padding: 8px 12px; border-top: 1px solid var(--line); display: flex; flex-direction: column; }
+.people li:first-child { border-top: 0; }
+.people li span { color: var(--muted); font-size: .85rem; }
+.talk .tt small { display: block; font-weight: 500; opacity: .8; }

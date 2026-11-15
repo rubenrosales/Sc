@@ -36,6 +36,7 @@ const ui = {
   myAll: false,       // My view: all days vs single day
   friend: null,       // index of friend being viewed
   pendingShare: null, // decoded share payload awaiting action
+  sheetStack: [],     // detail sheets to go back to
 };
 
 function load() {
@@ -379,7 +380,7 @@ function viewAll() {
   let list = all;
   if (q) {
     const terms = q.split(/\s+/);
-    list = list.filter((s) => terms.every((t) => s.hay.includes(t)));
+    list = list.filter((s) => terms.every((t) => s.hay.includes(t) || (detHay.get(s.id) || '').includes(t)));
   } else {
     list = list.filter((s) => s.date === ui.day && !s.parent);
   }
@@ -396,7 +397,7 @@ function viewAll() {
   if (q && list.length > 150) list = list.slice(0, 150);
 
   let html = `<div class="toolbar">
-    <div class="search"><input id="q" type="search" placeholder="Search title, speaker, room… (press /)" value="${esc(ui.q)}" autocomplete="off" enterkeyhint="search"></div>
+    <div class="search"><input id="q" type="search" placeholder="Search talks, speakers, orgs, rooms…" value="${esc(ui.q)}" autocomplete="off" enterkeyhint="search"></div>
     <div class="chips">${typesPresent.map((t) => `<button class="chip t-${t} ${ui.types.has(t) ? 'on' : ''}" data-type="${t}">${TYPES[t]}</button>`).join('')}</div>
   </div>`;
 
@@ -537,21 +538,70 @@ function viewMore() {
 // ------------------------------------------------------------------
 // Detail sheet
 // ------------------------------------------------------------------
-function openDetail(id) {
+// Full details (descriptions, people, chairs, passes) live in data/details.json,
+// loaded in the background and cached offline by the service worker.
+let details = null;
+let detailsState = 'idle'; // idle | loading | ok | fail
+const detHay = new Map();
+
+async function loadDetails(fresh = false) {
+  if (detailsState === 'loading') return;
+  detailsState = 'loading';
+  try {
+    const r = await fetch('data/details.json', { cache: fresh ? 'no-cache' : 'default' });
+    if (!r.ok) throw new Error(r.status);
+    details = await r.json();
+    detHay.clear();
+    for (const [id, d] of Object.entries(details)) {
+      const ppl = [...(d.people || []), ...(d.chairs || [])].map((x) => `${x.n} ${x.o || ''}`).join(' ');
+      detHay.set(id, `${d.d || ''} ${ppl}`.toLowerCase());
+    }
+    detailsState = 'ok';
+  } catch {
+    detailsState = details ? 'ok' : 'fail';
+  }
+  const open = $('#sheet .sheet[data-id]');
+  if (open && $('#sheet').open) openDetail(open.dataset.id, { keepStack: true, keepScroll: true });
+}
+const det = (id) => (details && details[id]) || {};
+const fullDesc = (s) => s.description || det(s.id).d || '';
+
+function peopleList(title, list) {
+  if (!list?.length) return '';
+  return `<h3 class="talkhead">${title}</h3><ul class="people">${list.map((p) => `<li><b>${esc(p.n)}</b>${p.o ? `<span>${esc(p.o)}</span>` : ''}</li>`).join('')}</ul>`;
+}
+
+function openDetail(id, { keepStack = false, keepScroll = false } = {}) {
   const s = index.get(id);
   if (!s) return;
+  const sheet = $('#sheet');
+  const prev = $('.sheet[data-id]', sheet)?.dataset.id;
+  if (!keepStack) {
+    if (sheet.open && prev && prev !== id) ui.sheetStack.push(prev);
+    else if (!sheet.open) ui.sheetStack = [];
+  }
+  const scrollY = sheet.scrollTop;
   const st = starred().has(id);
   const fr = friendsFor(id);
+  const d = det(id);
   const sameTime = isBackground(s) ? [] : mySessions().filter((x) => x.id !== id && !isBackground(x) && x.date === s.date && toMin(x.start) < toMin(s.end) && toMin(s.start) < toMin(x.end));
-  const sheet = $('#sheet');
+  const par = s.parent && index.get(s.parent);
+  const kids = children.get(id);
+  const desc = fullDesc(s);
+  const presenting = (d.people || []).filter((p) => !p.x);
+  const others = (d.people || []).filter((p) => p.x);
+  const back = ui.sheetStack.length ? index.get(ui.sheetStack[ui.sheetStack.length - 1]) : null;
+  const pending = !s.mine && detailsState !== 'ok';
+
   sheet.innerHTML = `<div class="sheet t-${s.type}" data-id="${id}">
     <div class="grab"></div>
     <button class="x" data-act="close" aria-label="Close">✕</button>
+    ${back ? `<button class="link back" data-act="back">‹ ${esc(back.title.length > 40 ? back.title.slice(0, 40) + '…' : back.title)}</button>` : ''}
     <span class="type">${esc(s.cat || TYPES[s.type] || 'Other')}</span>
     <h2>${esc(s.title)}</h2>
     <p class="when">🕒 ${esc(dayLabel(s.date, true))} · ${fmtTime(s.start)}–${fmtTime(s.end)} <small>(${fmtDur(toMin(s.end) - toMin(s.start))})</small></p>
-    ${s.room ? `<p class="when">📍 ${esc(s.room)}</p>` : ''}
-    ${s.speakers ? `<p class="when">👤 ${esc(s.speakers)}</p>` : ''}
+    ${s.room ? `<p class="when">📍 <b>${esc(s.room)}</b></p>` : ''}
+    ${par ? `<p class="when">📂 Part of <a href="#" data-open="${s.parent}">${esc(par.title)}</a></p>` : ''}
     ${fr.length ? `<p class="when">👥 Also going: ${fr.map((f) => esc(f.name)).join(', ')}</p>` : ''}
     ${st && changeOf(s) ? `<div class="banner warn">⚠️ Organizers changed the ${esc(changeOf(s))}. <button class="link" data-act="ack-change">OK, got it</button></div>` : ''}
     ${s.gone ? '<div class="banner warn">⚠️ This session is no longer in the official program (cancelled or moved). Check the official site.</div>' : ''}
@@ -560,23 +610,33 @@ function openDetail(id) {
       <button class="btn ${st ? '' : 'primary'}" data-act="star">${st ? '★ In my schedule' : '☆ Add to my schedule'}</button>
       <button class="btn" data-act="ics1">📅 Calendar</button>
       ${navigator.share ? '<button class="btn" data-act="share1">Share</button>' : ''}
-      ${s.url ? `<a class="btn" href="${esc(s.url)}" target="_blank" rel="noopener">Details ↗</a>` : ''}
       ${s.mine ? `<a class="btn ghost" href="#/edit/${id}">Edit</a>` : ''}
     </div>
-    ${s.parent && index.get(s.parent) ? `<p class="when">📂 Part of <a href="#" data-open="${s.parent}">${esc(index.get(s.parent).title)}</a></p>` : ''}
-    ${s.track ? `<p class="hint">🏷️ ${esc(s.track)}</p>` : ''}
-    ${s.description ? `<div class="desc">${esc(s.description).replace(/\n/g, '<br>')}</div>` : ''}
-    ${children.get(id) ? `<h3 class="talkhead">Talks in this session (${children.get(id).length})</h3><div class="talks">${children.get(id).map((k) => {
+    <div class="facts">
+      ${d.reg ? `<span class="fact">🎫 ${d.reg.map(esc).join(' · ')}</span>` : ''}
+      ${d.rec ? `<span class="fact">🎥 ${esc(d.rec)}</span>` : ''}
+      ${s.track ? s.track.split(', ').map((t) => `<span class="fact tag">${esc(t)}</span>`).join('') : ''}
+    </div>
+    ${desc ? `<h3 class="talkhead">Description</h3><div class="desc">${esc(desc).replace(/\n/g, '<br>')}</div>` : ''}
+    ${peopleList('Session chairs', d.chairs)}
+    ${peopleList(presenting.length === 1 ? 'Speaker' : 'Speakers', presenting)}
+    ${peopleList('Authors &amp; organizers', others)}
+    ${!d.people && s.speakers ? `<p class="when">👤 ${esc(s.speakers)}</p>` : ''}
+    ${pending ? `<p class="hint">${detailsState === 'fail' ? '📶 Full description and speaker details need a connection once — they’ll be saved for offline after that.' : 'Loading full details…'}</p>` : ''}
+    ${kids ? `<h3 class="talkhead">Talks in this session (${kids.length})</h3><div class="talks">${kids.map((k) => {
       const ks = starred().has(k.id);
-      return `<div class="talk ${ks ? 'starred' : ''}" data-open="${k.id}"><span class="tt">${fmtTime(k.start)}</span><span class="tn">${esc(k.title)}${k.speakers ? `<small>${esc(k.speakers)}</small>` : ''}</span><button class="star" data-star="${k.id}" aria-label="Star talk">${ks ? '★' : '☆'}</button></div>`;
-    }).join('')}</div>` : ''}
+      return `<div class="talk ${ks ? 'starred' : ''}" data-open="${k.id}"><span class="tt">${fmtTime(k.start)}<small>${fmtTime(k.end)}</small></span><span class="tn">${esc(k.title)}${k.speakers ? `<small>${esc(k.speakers)}</small>` : ''}</span><button class="star" data-star="${k.id}" aria-label="Star talk">${ks ? '★' : '☆'}</button></div>`;
+    }).join('')}</div><p class="hint">Tap a talk for its abstract and speakers.</p>` : ''}
     <label class="notes">My notes<textarea id="note" rows="3" placeholder="Questions to ask, people to meet, takeaways…">${esc(store.notes[id] || '')}</textarea></label>
+    ${s.url ? `<p class="center"><a href="${esc(s.url)}" target="_blank" rel="noopener">Open on the official SC26 site ↗</a></p>` : ''}
   </div>`;
   if (!sheet.open) sheet.showModal();
+  sheet.scrollTop = keepScroll ? scrollY : 0;
 }
 
 function closeSheet() {
   const sheet = $('#sheet');
+  ui.sheetStack = [];
   if (sheet.open) sheet.close();
 }
 
@@ -713,6 +773,7 @@ function planAsText() {
 
 function exportICS(list, name) {
   if (!list.length) return toast('Nothing to export');
+  list = list.map((x) => ({ ...x, description: fullDesc(x), speakers: x.speakers }));
   const text = sessionsToICS(list, { tz: tz(), name: `${conf().name || ''} schedule`, notes: store.notes });
   try {
     const file = new File([text], name, { type: 'text/calendar' });
@@ -780,6 +841,7 @@ async function refreshMaster(manual = false) {
       // Don't wipe a form the user is typing in.
       if (['my', 'all'].includes(route().name)) render();
     }
+    if (changed || manual) loadDetails(true);
     if (manual) toast(changed ? 'Schedule updated' : 'Schedule is up to date');
   } catch (e) {
     if (manual) toast('Offline — using saved schedule');
@@ -968,11 +1030,12 @@ document.addEventListener('click', async (e) => {
     const sheetId = t.closest('.sheet')?.dataset.id;
     switch (act) {
       case 'close': closeSheet(); return;
+      case 'back': openDetail(ui.sheetStack.pop(), { keepStack: true }); return;
       case 'my-day': ui.myAll = false; render(); return;
       case 'my-all': ui.myAll = true; render(); return;
       case 'toggle-past': store.settings.hidePast = !store.settings.hidePast; save(); render(); return;
       case 'jump-now': ui.day = now().date; return; // link continues to #/all
-      case 'star': toggleStar(sheetId); openDetail(sheetId); render(); return;
+      case 'star': toggleStar(sheetId); openDetail(sheetId, { keepStack: true, keepScroll: true }); render(); return;
       case 'ics1': exportICS([index.get(sheetId)], `${index.get(sheetId).title.slice(0, 40).replace(/[^\w]+/g, '-')}.ics`); return;
       case 'share1': {
         const s = index.get(sheetId);
@@ -1000,7 +1063,7 @@ document.addEventListener('click', async (e) => {
         if (!(await handleShareHash(v))) toast('That doesn’t look like a planner link');
         return;
       }
-      case 'ack-change': store.snap[sheetId] = snapOf(index.get(sheetId)); save(); openDetail(sheetId); render(); return;
+      case 'ack-change': store.snap[sheetId] = snapOf(index.get(sheetId)); save(); openDetail(sheetId, { keepStack: true, keepScroll: true }); render(); return;
       case 'restore-merge': restoreBackup(ui.pendingRestore, false); ui.pendingRestore = null; closeSheet(); location.hash = '#/my'; render(); return;
       case 'restore-replace':
         if (!confirm('Replace all stars, notes and events on this device with the backup?')) return;
@@ -1155,6 +1218,7 @@ syncSnaps();
 ui.day = defaultDay();
 render();
 handleShareHash();
+setTimeout(() => loadDetails(), 300);
 refreshMaster().then(() => {
   // first run with no cache: make sure day/notice are right
   if (!confDays().includes(ui.day)) { ui.day = defaultDay(); render(); }
