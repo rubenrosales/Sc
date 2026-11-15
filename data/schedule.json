@@ -1,0 +1,34 @@
+{
+  "conference": {
+    "name": "SC26",
+    "fullName": "SC26 · The International Conference for High Performance Computing, Networking, Storage, and Analysis",
+    "tz": "America/Chicago",
+    "start": "2026-11-15",
+    "end": "2026-11-20",
+    "venue": "McCormick Place, Chicago",
+    "venueMap": "https://www.google.com/maps/search/?api=1&query=McCormick+Place+Chicago",
+    "url": "https://sc26.supercomputing.org/",
+    "programUrl": "https://sc26.supercomputing.org/program/"
+  },
+  "updated": "2026-11-10",
+  "notice": "Draft skeleton: these are the usual SC landmarks with typical times, NOT the official program. Check times on the official SC26 site, or import the real sessions (More → Import).",
+  "sessions": [
+    { "title": "Tutorials (full & half day)", "date": "2026-11-15", "start": "08:30", "end": "17:00", "type": "tutorial", "description": "Tutorials run Sunday and Monday. Check the official program for individual tutorials and rooms." },
+    { "title": "Workshops", "date": "2026-11-15", "start": "09:00", "end": "17:30", "type": "workshop", "description": "Workshops run Sunday, Monday and Friday." },
+    { "title": "Tutorials (full & half day)", "date": "2026-11-16", "start": "08:30", "end": "17:00", "type": "tutorial" },
+    { "title": "Workshops", "date": "2026-11-16", "start": "09:00", "end": "17:30", "type": "workshop" },
+    { "title": "Gala Opening Reception (Exhibit Hall)", "date": "2026-11-16", "start": "19:00", "end": "21:00", "type": "social", "description": "First look at the exhibit floor." },
+    { "title": "Keynote", "date": "2026-11-17", "start": "08:30", "end": "10:00", "type": "keynote" },
+    { "title": "Exhibit Floor Open", "date": "2026-11-17", "start": "10:00", "end": "18:00", "type": "exhibit", "description": "Exhibits are open Tuesday through Thursday." },
+    { "title": "Technical Program: Papers, Panels, Invited Talks", "date": "2026-11-17", "start": "10:30", "end": "17:00", "type": "paper" },
+    { "title": "TOP500 BoF", "date": "2026-11-17", "start": "17:15", "end": "18:45", "type": "bof", "description": "Release and discussion of the new TOP500 list." },
+    { "title": "Poster Reception", "date": "2026-11-17", "start": "17:15", "end": "19:00", "type": "poster" },
+    { "title": "Exhibit Floor Open", "date": "2026-11-18", "start": "10:00", "end": "18:00", "type": "exhibit" },
+    { "title": "Technical Program: Papers, Panels, Invited Talks", "date": "2026-11-18", "start": "10:30", "end": "17:00", "type": "paper" },
+    { "title": "Birds of a Feather (BoF) sessions", "date": "2026-11-18", "start": "12:15", "end": "13:15", "type": "bof" },
+    { "title": "Exhibit Floor Open", "date": "2026-11-19", "start": "10:00", "end": "15:00", "type": "exhibit", "description": "Last exhibit day; the floor usually closes early." },
+    { "title": "Technical Program: Papers, Panels, Invited Talks", "date": "2026-11-19", "start": "10:30", "end": "17:00", "type": "paper" },
+    { "title": "Awards Ceremony (incl. ACM Gordon Bell Prize)", "date": "2026-11-19", "start": "12:45", "end": "13:30", "type": "award" },
+    { "title": "Workshops & Panels (half day)", "date": "2026-11-20", "start": "08:30", "end": "12:00", "type": "workshop", "description": "Conference wraps up around midday Friday." }
+  ]
+}
