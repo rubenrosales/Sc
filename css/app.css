@@ -1,3 +1,4 @@
+[hidden] { display: none !important; }
 :root {
   --bg: #f5f7fb;
   --panel: #ffffff;
@@ -276,3 +277,14 @@ body:has(dialog[open]) { overflow: hidden; }
 .people li:first-child { border-top: 0; }
 .people li span { color: var(--muted); font-size: .85rem; }
 .talk .tt small { display: block; font-weight: 500; opacity: .8; }
+
+/* shared (read-only) view */
+body.shared .tabs, body.shared .searchbtn { display: none; }
+body.shared { padding-bottom: 24px; }
+.shared-head h1 { margin: 6px 0 2px; font-size: 1.45rem; line-height: 1.2; }
+.shared-head p { margin: 0 0 12px; color: var(--muted); font-size: .88rem; }
+.card.ro { grid-template-columns: 62px 1fr; padding-right: 14px; }
+.talk.ro { grid-template-columns: 58px 1fr; padding-right: 12px; }
+details.earlier { margin-top: 18px; }
+details.earlier > summary { padding: 6px 2px; }
+.shared-foot { text-align: center; margin: 28px 0 8px; line-height: 1.8; }

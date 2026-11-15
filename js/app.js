@@ -239,10 +239,10 @@ function initials(name) {
   return (name || '?').split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
 }
 
-function card(s, { conflict = false, showDay = false, n = now() } = {}) {
-  const st = starred().has(s.id);
+function card(s, { conflict = false, showDay = false, n = now(), ro = false } = {}) {
+  const st = !ro && starred().has(s.id);
   const stt = status(s, n);
-  const fr = friendsFor(s.id);
+  const fr = ro ? [] : friendsFor(s.id);
   const kids = children.get(s.id);
   const par = s.parent && index.get(s.parent);
   const meta = [
@@ -250,16 +250,16 @@ function card(s, { conflict = false, showDay = false, n = now() } = {}) {
     `<span>${esc(s.cat || TYPES[s.type] || 'Other')}</span>`,
     s.speakers && `<span class="who">${esc(s.speakers)}</span>`,
   ].filter(Boolean).join('<i>·</i>');
-  return `<article class="card t-${s.type} ${st ? 'starred' : ''} ${stt} ${conflict ? 'conflict' : ''}" data-id="${s.id}" tabindex="0">
+  return `<article class="card t-${s.type} ${ro ? 'ro' : ''} ${st ? 'starred' : ''} ${stt} ${conflict ? 'conflict' : ''}" data-id="${s.id}" tabindex="0">
     <div class="time">${showDay ? `<b class="dd">${dayLabel(s.date).dow}</b>` : ''}<span>${fmtTime(s.start)}</span><small>${fmtTime(s.end)}</small></div>
     <div class="body">
       <h3>${esc(s.title)}</h3>
       <p class="meta">${meta}</p>
       ${par ? `<p class="parent">in ${esc(par.title)}</p>` : ''}
-      ${kids ? `<span class="pill">${kids.length} talk${kids.length === 1 ? '' : 's'}</span>` : ''}${stt === 'now' ? '<span class="pill live">Now</span>' : ''}${conflict ? '<span class="pill warn">Overlap</span>' : ''}${s.mine ? '<span class="pill">Added by you</span>' : ''}${s.gone ? '<span class="pill warn">Removed from program</span>' : ''}${st && changeOf(s) ? '<span class="pill warn">Changed</span>' : ''}${store.notes[s.id] ? '<span class="pill">📝 Note</span>' : ''}
+      ${kids ? `<span class="pill">${kids.length} talk${kids.length === 1 ? '' : 's'}</span>` : ''}${stt === 'now' ? '<span class="pill live">Now</span>' : ''}${conflict ? '<span class="pill warn">Overlap</span>' : ''}${s.mine && !ro ? '<span class="pill">Added by you</span>' : ''}${s.gone ? '<span class="pill warn">Removed from program</span>' : ''}${st && changeOf(s) ? '<span class="pill warn">Changed</span>' : ''}${!ro && store.notes[s.id] ? '<span class="pill">📝 Note</span>' : ''}
       ${fr.length ? `<span class="friends">${fr.map((f) => `<b title="${esc(f.name)}">${esc(initials(f.name))}</b>`).join('')}</span>` : ''}
     </div>
-    <button class="star" aria-label="${st ? 'Remove from' : 'Add to'} my schedule" aria-pressed="${st}">${st ? '★' : '☆'}</button>
+    ${ro ? '' : `<button class="star" aria-label="${st ? 'Remove from' : 'Add to'} my schedule" aria-pressed="${st}">${st ? '★' : '☆'}</button>`}
   </article>`;
 }
 
@@ -466,6 +466,54 @@ function viewAdd(editId) {
   </form>`;
 }
 
+// What someone sees when they open a shared link: a clean, read-only schedule.
+function sharedItems() {
+  const p = ui.shared;
+  const custom = (p.c || []).map((c) => ({ ...normalize(c), mine: true }));
+  const ids = new Set(p.s || []);
+  const list = [...custom];
+  for (const id of ids) if (index.has(id) && !index.get(id).mine) list.push(index.get(id));
+  return list.sort(sortByTime);
+}
+
+function viewShared() {
+  const p = ui.shared;
+  const n = now();
+  const who = p.n ? `${p.n}’s` : 'Shared';
+  const first = p.n ? p.n.split(' ')[0] : 'They';
+  const list = sharedItems();
+  let html = `<div class="shared-head">
+    <h1>${esc(who)} ${esc(conf().name || '')} schedule</h1>
+    <p>${list.length} session${list.length === 1 ? '' : 's'} · ${esc(conf().venue || '')} · times are Chicago time</p>
+  </div>`;
+  if (!list.length) {
+    return html + `<div class="empty"><p>${master.sessions.length ? 'No sessions in this schedule.' : 'Loading schedule…'}</p></div>`;
+  }
+
+  // where are they now / next
+  const today = list.filter((x) => x.date === n.date);
+  const live = today.filter((x) => status(x, n) === 'now');
+  const cur = live.some((x) => !isBackground(x)) ? live.filter((x) => !isBackground(x)) : live.slice(0, 1);
+  const next = today.find((x) => toMin(x.start) > n.min && !isBackground(x));
+  if (cur.length || next) {
+    html += '<div class="nowcard">';
+    for (const x of cur) html += `<button class="nowitem" data-id="${x.id}"><small>${esc(first)} is at · until ${fmtTime(x.end)}</small><b>${esc(x.title)}</b>${x.room ? `<span>📍 ${esc(x.room)}</span>` : ''}</button>`;
+    if (next) html += `<button class="nowitem next" data-id="${next.id}"><small>Next · ${fmtTime(next.start)}</small><b>${esc(next.title)}</b>${next.room ? `<span>📍 ${esc(next.room)}</span>` : ''}</button>`;
+    html += '</div>';
+  }
+
+  const days = [...new Set(list.map((x) => x.date))];
+  const past = days.filter((d) => d < n.date);
+  const upcoming = days.filter((d) => d >= n.date);
+  const dayBlock = (d) => `<h2 class="dayhead">${d === n.date ? 'Today · ' : ''}${esc(dayLabel(d, true))}</h2><div class="list">${list.filter((x) => x.date === d).map((x) => card(x, { n, ro: true })).join('')}</div>`;
+  html += (upcoming.length ? upcoming : days).map(dayBlock).join('');
+  if (upcoming.length && past.length) {
+    html += `<details class="earlier"><summary>Earlier days (${past.length})</summary>${past.map(dayBlock).join('')}</details>`;
+  }
+  html += `<p class="shared-foot hint">Tap any session for details.<br><a href="#/my" data-act="leave-shared">${store.starred.length ? 'Back to my planner' : `Make your own ${esc(conf().name || '')} schedule`}</a>${store.starred.length ? ` · <button class="link" data-act="keep-shared">Save ${esc(first)}’s schedule in my planner</button>` : ''}</p>`;
+  return html;
+}
+
 function viewMore() {
   const c = conf();
   return `<div class="more">
@@ -592,6 +640,8 @@ function openDetail(id, { keepStack = false, keepScroll = false } = {}) {
   const others = (d.people || []).filter((p) => p.x);
   const back = ui.sheetStack.length ? index.get(ui.sheetStack[ui.sheetStack.length - 1]) : null;
   const pending = !s.mine && detailsState !== 'ok';
+  if (detailsState === 'idle') loadDetails();
+  const ro = !!ui.shared;
 
   sheet.innerHTML = `<div class="sheet t-${s.type}" data-id="${id}">
     <div class="grab"></div>
@@ -602,11 +652,11 @@ function openDetail(id, { keepStack = false, keepScroll = false } = {}) {
     <p class="when">🕒 ${esc(dayLabel(s.date, true))} · ${fmtTime(s.start)}–${fmtTime(s.end)} <small>(${fmtDur(toMin(s.end) - toMin(s.start))})</small></p>
     ${s.room ? `<p class="when">📍 <b>${esc(s.room)}</b></p>` : ''}
     ${par ? `<p class="when">📂 Part of <a href="#" data-open="${s.parent}">${esc(par.title)}</a></p>` : ''}
-    ${fr.length ? `<p class="when">👥 Also going: ${fr.map((f) => esc(f.name)).join(', ')}</p>` : ''}
-    ${st && changeOf(s) ? `<div class="banner warn">⚠️ Organizers changed the ${esc(changeOf(s))}. <button class="link" data-act="ack-change">OK, got it</button></div>` : ''}
+    ${!ro && fr.length ? `<p class="when">👥 Also going: ${fr.map((f) => esc(f.name)).join(', ')}</p>` : ''}
+    ${!ro && st && changeOf(s) ? `<div class="banner warn">⚠️ Organizers changed the ${esc(changeOf(s))}. <button class="link" data-act="ack-change">OK, got it</button></div>` : ''}
     ${s.gone ? '<div class="banner warn">⚠️ This session is no longer in the official program (cancelled or moved). Check the official site.</div>' : ''}
-    ${sameTime.length ? `<div class="banner warn">⚠️ Overlaps with ${sameTime.map((x) => `<a href="#" data-open="${x.id}">${esc(x.title)}</a>`).join(', ')}</div>` : ''}
-    <div class="row wrap actions">
+    ${!ro && sameTime.length ? `<div class="banner warn">⚠️ Overlaps with ${sameTime.map((x) => `<a href="#" data-open="${x.id}">${esc(x.title)}</a>`).join(', ')}</div>` : ''}
+    <div class="row wrap actions" ${ro ? 'hidden' : ''}>
       <button class="btn ${st ? '' : 'primary'}" data-act="star">${st ? '★ In my schedule' : '☆ Add to my schedule'}</button>
       <button class="btn" data-act="ics1">📅 Calendar</button>
       ${navigator.share ? '<button class="btn" data-act="share1">Share</button>' : ''}
@@ -625,9 +675,9 @@ function openDetail(id, { keepStack = false, keepScroll = false } = {}) {
     ${pending ? `<p class="hint">${detailsState === 'fail' ? '📶 Full description and speaker details need a connection once — they’ll be saved for offline after that.' : 'Loading full details…'}</p>` : ''}
     ${kids ? `<h3 class="talkhead">Talks in this session (${kids.length})</h3><div class="talks">${kids.map((k) => {
       const ks = starred().has(k.id);
-      return `<div class="talk ${ks ? 'starred' : ''}" data-open="${k.id}"><span class="tt">${fmtTime(k.start)}<small>${fmtTime(k.end)}</small></span><span class="tn">${esc(k.title)}${k.speakers ? `<small>${esc(k.speakers)}</small>` : ''}</span><button class="star" data-star="${k.id}" aria-label="Star talk">${ks ? '★' : '☆'}</button></div>`;
+      return `<div class="talk ${ks && !ro ? 'starred' : ''} ${ro ? 'ro' : ''}" data-open="${k.id}"><span class="tt">${fmtTime(k.start)}<small>${fmtTime(k.end)}</small></span><span class="tn">${esc(k.title)}${k.speakers ? `<small>${esc(k.speakers)}</small>` : ''}</span>${ro ? '' : `<button class="star" data-star="${k.id}" aria-label="Star talk">${ks ? '★' : '☆'}</button>`}</div>`;
     }).join('')}</div><p class="hint">Tap a talk for its abstract and speakers.</p>` : ''}
-    <label class="notes">My notes<textarea id="note" rows="3" placeholder="Questions to ask, people to meet, takeaways…">${esc(store.notes[id] || '')}</textarea></label>
+    <label class="notes" ${ro ? 'hidden' : ''}>My notes<textarea id="note" rows="3" placeholder="Questions to ask, people to meet, takeaways…">${esc(store.notes[id] || '')}</textarea></label>
     ${s.url ? `<p class="center"><a href="${esc(s.url)}" target="_blank" rel="noopener">Open on the official SC26 site ↗</a></p>` : ''}
   </div>`;
   if (!sheet.open) sheet.showModal();
@@ -702,6 +752,7 @@ function showLink({ title, url, hint }) {
     <div class="row wrap actions">
       <button class="btn primary" data-act="link-copy">📋 Copy link</button>
       ${navigator.share ? '<button class="btn" data-act="link-share">📤 Share…</button>' : ''}
+      ${/#plan=/.test(url) ? `<a class="btn ghost" href="${esc(url.slice(url.indexOf('#')))}">👀 Preview</a>` : ''}
     </div>
   </div>`;
   if (!sheet.open) sheet.showModal();
@@ -754,7 +805,7 @@ async function shareMine() {
   showLink({
     title: `${who} ${conf().name || ''} schedule · ${ids.length} sessions`,
     url,
-    hint: 'Send this to anyone. It shows what you’re attending right now — share again after you change plans.',
+    hint: 'Anyone who opens it sees a simple page with your sessions — no app or sign-up. It reflects your plans right now, so share again after big changes.',
   });
 }
 
@@ -834,14 +885,16 @@ async function refreshMaster(manual = false) {
     const m = await r.json();
     const changed = JSON.stringify(m) !== localStorage.getItem(MASTER_KEY);
     if (changed) {
-      try { localStorage.setItem(MASTER_KEY, JSON.stringify(m)); } catch { /* the service worker cache still has it */ }
+      if (!ui.shared || store.starred.length) {
+        try { localStorage.setItem(MASTER_KEY, JSON.stringify(m)); } catch { /* the service worker cache still has it */ }
+      }
       master = prepMaster(m);
       rebuildIndex();
       if (!ui.day || !confDays().includes(ui.day)) ui.day = defaultDay();
       // Don't wipe a form the user is typing in.
-      if (['my', 'all'].includes(route().name)) render();
+      if (ui.shared || ['my', 'all'].includes(route().name)) render();
     }
-    if (changed || manual) loadDetails(true);
+    if ((changed || manual) && detailsState !== 'idle') loadDetails(true);
     if (manual) toast(changed ? 'Schedule updated' : 'Schedule is up to date');
   } catch (e) {
     if (manual) toast('Offline — using saved schedule');
@@ -881,6 +934,18 @@ async function handleShareHash(src = location.hash) {
   }
   const m = src.match(/[#&]plan=([\w-]+)/);
   if (!m) return false;
+  if (src === location.hash) {
+    try {
+      ui.shared = await decodePlan(m[1]);
+      closeSheet();
+      render();
+      window.scrollTo({ top: 0 });
+    } catch (e) {
+      console.error(e);
+      toast('That share link looks broken');
+    }
+    return true;
+  }
   try {
     const p = await decodePlan(m[1]);
     ui.pendingShare = p;
@@ -955,6 +1020,13 @@ function route() {
 function render() {
   const r = route();
   const view = $('#view');
+  document.body.classList.toggle('shared', !!ui.shared);
+  if (ui.shared) {
+    $('#days').hidden = true;
+    view.innerHTML = viewShared();
+    document.title = `${ui.shared.n ? `${ui.shared.n}’s ` : ''}${conf().name || ''} schedule`;
+    return;
+  }
   const focusedSearch = document.activeElement?.id === 'q';
   const caret = focusedSearch ? document.activeElement.selectionStart : 0;
   renderDays();
@@ -1030,6 +1102,13 @@ document.addEventListener('click', async (e) => {
     const sheetId = t.closest('.sheet')?.dataset.id;
     switch (act) {
       case 'close': closeSheet(); return;
+      case 'leave-shared': ui.shared = null; return; // the link navigates to #/my
+      case 'keep-shared': {
+        const i = saveFriend(ui.shared, ui.shared.n);
+        ui.shared = null; ui.friend = i; location.hash = '#/my'; render();
+        toast(`Saved ${store.friends[i].name}'s schedule`);
+        return;
+      }
       case 'back': openDetail(ui.sheetStack.pop(), { keepStack: true }); return;
       case 'my-day': ui.myAll = false; render(); return;
       case 'my-all': ui.myAll = true; render(); return;
@@ -1052,7 +1131,7 @@ document.addEventListener('click', async (e) => {
       }
       case 'link-copy': copyText(ui.linkOut.url); return;
       case 'link-share':
-        navigator.share({ title: ui.linkOut.title, url: ui.linkOut.url }).catch((err) => { if (err.name !== 'AbortError') copyText(ui.linkOut.url); });
+        navigator.share({ title: ui.linkOut.title, text: /#plan=/.test(ui.linkOut.url) ? 'Here’s where I’ll be at SC26:' : undefined, url: ui.linkOut.url }).catch((err) => { if (err.name !== 'AbortError') copyText(ui.linkOut.url); });
         return;
       case 'paste-link': {
         try { $('#linkin').value = await navigator.clipboard.readText(); } catch { toast('Paste it into the box instead'); return; }
@@ -1174,6 +1253,7 @@ document.addEventListener('submit', (e) => {
 
 window.addEventListener('hashchange', async () => {
   if (await handleShareHash()) return;
+  ui.shared = null;
   closeSheet();
   render();
   window.scrollTo({ top: 0 });
@@ -1201,7 +1281,7 @@ document.addEventListener('touchend', (e) => {
 setInterval(() => {
   if ($('#sheet').open) return;
   if (/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) return;
-  if (route().name === 'my') render();
+  if (ui.shared || route().name === 'my') render();
 }, 60_000);
 let lastRefresh = 0;
 document.addEventListener('visibilitychange', () => {
@@ -1216,14 +1296,16 @@ document.addEventListener('visibilitychange', () => {
 applyTheme();
 syncSnaps();
 ui.day = defaultDay();
-render();
+const openedShared = /[#&]plan=/.test(location.hash);
+if (!openedShared) render();
 handleShareHash();
-setTimeout(() => loadDetails(), 300);
+if (!openedShared) setTimeout(() => loadDetails(), 300);
 refreshMaster().then(() => {
   // first run with no cache: make sure day/notice are right
   if (!confDays().includes(ui.day)) { ui.day = defaultDay(); render(); }
 });
 
-if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+// Casual viewers of a shared link don't need offline caching (saves their data plan).
+if ('serviceWorker' in navigator && location.protocol !== 'file:' && (!openedShared || store.starred.length || navigator.serviceWorker.controller)) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
