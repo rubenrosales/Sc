@@ -242,3 +242,21 @@ dialog#sheet[open] { animation: up .18s ease-out; }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 .sharebar { margin: -2px 0 10px; }
 .sharebar .btn { flex: 1; }
+
+/* sessions & talks */
+.t-community { --c: #0891b2; } .t-student { --c: #84cc16; }
+.card .parent { margin: 2px 0 0; font-size: .78rem; color: var(--muted); font-style: italic; }
+.card .who { display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
+.talkhead { font-size: .95rem; margin: 16px 0 6px; }
+.talks { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.talk { display: grid; grid-template-columns: 58px 1fr 40px; gap: 8px; align-items: center; padding: 8px 4px 8px 10px; border-top: 1px solid var(--line); cursor: pointer; font-size: .9rem; }
+.talk:first-child { border-top: 0; }
+.talk .tt { font-variant-numeric: tabular-nums; font-weight: 700; font-size: .82rem; color: var(--muted); }
+.talk .tn small { display: block; color: var(--muted); font-size: .76rem; }
+.talk .star { border: 0; background: none; font-size: 1.3rem; color: var(--muted); cursor: pointer; }
+.talk.starred .star { color: var(--star); }
+.banner.tip { background: color-mix(in srgb, var(--star) 14%, var(--panel)); border-color: color-mix(in srgb, var(--star) 35%, var(--line)); }
+.more .row input { margin: 0; flex: 1; }
+details.adv { margin: 8px 0 14px; }
+details.adv > summary { padding: 6px 2px; }
+details.adv textarea { margin: 8px 0; }

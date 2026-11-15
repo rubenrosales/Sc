@@ -1,18 +1,20 @@
-name: Deploy to GitHub Pages
+name: Sync program & deploy to GitHub Pages
 
 on:
   push:
     branches: [main, claude/brave-goldberg-g1ooui]
+  schedule:
+    - cron: "17 */3 * * *"   # refresh the official program every 3 hours
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -22,8 +24,22 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Pull latest official program
+        if: github.event_name != 'push'
+        continue-on-error: true
+        run: |
+          python3 tools/import_linklings.py
+          if ! git diff --quiet data/schedule.json; then
+            git config user.name "schedule-sync"
+            git config user.email "schedule-sync@users.noreply.github.com"
+            git commit -am "Sync official SC26 program"
+            git push
+          fi
+
       - name: Stamp service-worker cache version
-        run: sed -i "s/const VERSION = 'v1'/const VERSION = '${GITHUB_SHA::8}'/" sw.js
+        run: sed -i "s/const VERSION = 'v1'/const VERSION = '${GITHUB_SHA::8}-${GITHUB_RUN_ID}'/" sw.js
+
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

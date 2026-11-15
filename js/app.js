@@ -11,7 +11,7 @@ const MASTER_KEY = 'scplanner:master';
 const TYPES = {
   keynote: 'Keynote', tutorial: 'Tutorial', workshop: 'Workshop', paper: 'Paper / Talk',
   bof: 'BoF', panel: 'Panel', poster: 'Poster', exhibit: 'Exhibit', social: 'Social',
-  award: 'Award', meeting: 'Meeting', other: 'Other',
+  award: 'Award', meeting: 'Meeting', community: 'Community', student: 'Students', other: 'Other',
 };
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -46,8 +46,24 @@ function load() {
   return defaults();
 }
 function save() {
-  localStorage.setItem(STORE_KEY, JSON.stringify(store));
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(store));
+  } catch (e) {
+    // Storage full: drop the cached program copy (it can be re-downloaded) and retry.
+    localStorage.removeItem(MASTER_KEY);
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(store)); } catch { toast('⚠️ Could not save — storage full'); }
+  }
+  askPersist();
 }
+
+// Ask the browser not to evict our data (no-op where unsupported).
+let persistAsked = false;
+function askPersist() {
+  if (persistAsked || !navigator.storage?.persist) return;
+  persistAsked = true;
+  navigator.storage.persisted().then((p) => p || navigator.storage.persist()).catch(() => {});
+}
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 function loadMaster() {
   try {
     const m = JSON.parse(localStorage.getItem(MASTER_KEY));
@@ -61,21 +77,38 @@ function prepMaster(m) {
 }
 
 const starred = () => new Set(store.starred);
+function sortByTime(a, b) {
+  return (a.date + a.start).localeCompare(b.date + b.start) || a.end.localeCompare(b.end) || a.title.localeCompare(b.title);
+}
 const conf = () => master.conference || {};
 const tz = () => conf().tz || CONF_TZ;
 
 // Unified index of all sessions (master + custom).
 let index = new Map();
+let children = new Map(); // parent session id -> talks
 function rebuildIndex() {
   index = new Map();
+  children = new Map();
   for (const s of master.sessions) index.set(s.id, s);
   for (const s of store.custom) index.set(s.id, { ...s, mine: true });
   for (const f of store.friends) for (const s of f.custom || []) if (!index.has(s.id)) index.set(s.id, { ...s, friendOnly: true });
+  for (const s of index.values()) {
+    if (s.parent && index.has(s.parent)) {
+      if (!children.has(s.parent)) children.set(s.parent, []);
+      children.get(s.parent).push(s);
+    }
+    if (!s.hay) {
+      Object.defineProperty(s, 'hay', {
+        value: `${s.title} ${s.room || ''} ${s.speakers || ''} ${s.track || ''} ${s.cat || ''} ${s.description || ''} ${TYPES[s.type] || ''}`.toLowerCase(),
+        enumerable: false,
+      });
+    }
+  }
+  for (const list of children.values()) list.sort(sortByTime);
 }
 rebuildIndex();
 
 const allSessions = () => [...index.values()].filter((s) => !s.friendOnly);
-const sortByTime = (a, b) => (a.date + a.start).localeCompare(b.date + b.start) || a.end.localeCompare(b.end) || a.title.localeCompare(b.title);
 
 function mySessions() {
   if (ui.friend != null && store.friends[ui.friend]) {
@@ -163,6 +196,7 @@ function conflictsIn(all) {
       const a = list[i], b = list[j];
       if (a.date !== b.date) continue;
       if (toMin(b.start) >= toMin(a.end)) continue;
+      if (a.parent === b.id || b.parent === a.id) continue;
       if (toMin(a.start) < toMin(b.end) && toMin(b.start) < toMin(a.end)) { bad.add(a.id); bad.add(b.id); }
     }
   }
@@ -177,13 +211,20 @@ function card(s, { conflict = false, showDay = false, n = now() } = {}) {
   const st = starred().has(s.id);
   const stt = status(s, n);
   const fr = friendsFor(s.id);
-  const meta = [s.room && `<span class="room">📍 ${esc(s.room)}</span>`, `<span>${esc(TYPES[s.type] || 'Other')}</span>`, s.speakers && `<span>${esc(s.speakers)}</span>`].filter(Boolean).join('<i>·</i>');
+  const kids = children.get(s.id);
+  const par = s.parent && index.get(s.parent);
+  const meta = [
+    s.room && `<span class="room">📍 ${esc(s.room)}</span>`,
+    `<span>${esc(s.cat || TYPES[s.type] || 'Other')}</span>`,
+    s.speakers && `<span class="who">${esc(s.speakers)}</span>`,
+  ].filter(Boolean).join('<i>·</i>');
   return `<article class="card t-${s.type} ${st ? 'starred' : ''} ${stt} ${conflict ? 'conflict' : ''}" data-id="${s.id}" tabindex="0">
     <div class="time">${showDay ? `<b class="dd">${dayLabel(s.date).dow}</b>` : ''}<span>${fmtTime(s.start)}</span><small>${fmtTime(s.end)}</small></div>
     <div class="body">
       <h3>${esc(s.title)}</h3>
       <p class="meta">${meta}</p>
-      ${stt === 'now' ? '<span class="pill live">Now</span>' : ''}${conflict ? '<span class="pill warn">Overlap</span>' : ''}${s.mine ? '<span class="pill">Added by you</span>' : ''}${store.notes[s.id] ? '<span class="pill">📝 Note</span>' : ''}
+      ${par ? `<p class="parent">in ${esc(par.title)}</p>` : ''}
+      ${kids ? `<span class="pill">${kids.length} talk${kids.length === 1 ? '' : 's'}</span>` : ''}${stt === 'now' ? '<span class="pill live">Now</span>' : ''}${conflict ? '<span class="pill warn">Overlap</span>' : ''}${s.mine ? '<span class="pill">Added by you</span>' : ''}${store.notes[s.id] ? '<span class="pill">📝 Note</span>' : ''}
       ${fr.length ? `<span class="friends">${fr.map((f) => `<b title="${esc(f.name)}">${esc(initials(f.name))}</b>`).join('')}</span>` : ''}
     </div>
     <button class="star" aria-label="${st ? 'Remove from' : 'Add to'} my schedule" aria-pressed="${st}">${st ? '★' : '☆'}</button>
@@ -225,6 +266,12 @@ function viewMy() {
 
   // Now / next card
   if (!friend) html += nowCard(mine, n);
+
+  if (!friend && !store.settings.tipDone) {
+    html += isStandalone()
+      ? `<div class="banner tip">💾 Everything you star is saved on this phone. Tip: under <b>More → Backup</b>, copy a backup link once in a while. <button class="link" data-act="dismiss-tip">Got it</button></div>`
+      : `<div class="banner tip">📲 <b>Install it:</b> tap Share → <b>Add to Home Screen</b> so it opens instantly, works offline and keeps your stars. The Home Screen app has its own storage, so do this <i>before</i> starring (or move stars over with More → Backup link). <button class="link" data-act="dismiss-tip">Got it</button></div>`;
+  }
 
   html += `<div class="seg" role="tablist">
     <button class="${!ui.myAll ? 'on' : ''}" data-act="my-day">${esc(dayLabel(ui.day, true))}</button>
@@ -273,7 +320,9 @@ function nowCard(mine, n) {
   }
   if (!days.includes(n.date)) return '';
   const today = mine.filter((s) => s.date === n.date);
-  const cur = today.filter((s) => status(s, n) === 'now');
+  const live = today.filter((s) => status(s, n) === 'now');
+  // Prefer specific sessions over all-day background blocks (shuttle, exhibit floor...).
+  const cur = live.some((s) => !isBackground(s)) ? live.filter((s) => !isBackground(s)) : live.slice(0, 1);
   const next = today.find((s) => toMin(s.start) > n.min);
   if (!cur.length && !next) {
     return `<div class="nowcard"><div><small>Right now</small><b>Nothing else planned today</b></div>
@@ -295,16 +344,13 @@ function viewAll() {
   const n = now();
   const q = ui.q.trim().toLowerCase();
   const all = allSessions();
-  const typesPresent = [...new Set(all.map((s) => s.type))].sort((a, b) => Object.keys(TYPES).indexOf(a) - Object.keys(TYPES).indexOf(b));
+  const typesPresent = [...new Set(all.filter((s) => !s.parent).map((s) => s.type))].sort((a, b) => Object.keys(TYPES).indexOf(a) - Object.keys(TYPES).indexOf(b));
   let list = all;
   if (q) {
     const terms = q.split(/\s+/);
-    list = list.filter((s) => {
-      const hay = `${s.title} ${s.room || ''} ${s.speakers || ''} ${s.track || ''} ${s.description || ''} ${TYPES[s.type]}`.toLowerCase();
-      return terms.every((t) => hay.includes(t));
-    });
+    list = list.filter((s) => terms.every((t) => s.hay.includes(t)));
   } else {
-    list = list.filter((s) => s.date === ui.day);
+    list = list.filter((s) => s.date === ui.day && !s.parent);
   }
   if (ui.types.size) list = list.filter((s) => ui.types.has(s.type));
   const isToday = !q && ui.day === n.date;
@@ -315,6 +361,8 @@ function viewAll() {
     hiddenPast = before - list.length;
   }
   list.sort(sortByTime);
+  const total = list.length;
+  if (q && list.length > 150) list = list.slice(0, 150);
 
   let html = `<div class="toolbar">
     <div class="search"><input id="q" type="search" placeholder="Search title, speaker, room… (press /)" value="${esc(ui.q)}" autocomplete="off" enterkeyhint="search"></div>
@@ -323,7 +371,7 @@ function viewAll() {
 
   if (master.notice) html += `<div class="banner notice">ℹ️ ${esc(master.notice)}</div>`;
 
-  html += `<p class="count">${list.length} session${list.length === 1 ? '' : 's'}${q ? ` matching “${esc(ui.q)}” across all days` : ` · ${esc(dayLabel(ui.day, true))}`}
+  html += `<p class="count">${total} result${total === 1 ? '' : 's'}${q && total > list.length ? ` (showing first ${list.length})` : ''}${q ? ` matching “${esc(ui.q)}” across all days` : ` · ${esc(dayLabel(ui.day, true))}`}
     ${isToday ? `<button class="link" data-act="toggle-past">${store.settings.hidePast ? `Show ${hiddenPast} earlier` : 'Hide earlier'}</button>` : ''}</p>`;
 
   if (!list.length) {
@@ -405,16 +453,22 @@ function viewMore() {
       <button class="btn sm" data-act="view-friend" data-i="${i}">View</button><button class="btn sm ghost" data-act="del-friend" data-i="${i}">Remove</button></li>`).join('')}</ul></section>` : ''}
 
     <section>
-      <h2>Import</h2>
-      <p class="hint">Load sessions from a calendar file (.ics), spreadsheet (.csv) or JSON. Use this to load the official program or a colleague’s list.</p>
-      <div class="row wrap">
-        <label class="btn file">📂 Choose file<input type="file" id="importfile" accept=".ics,.csv,.tsv,.json,.txt,text/calendar,text/csv,application/json" hidden></label>
+      <h2>Open a link</h2>
+      <p class="hint">Got a schedule link from a friend, or your own backup link? If you use the Home Screen app, paste it here (links tapped in Messages open in Safari instead).</p>
+      <div class="row">
+        <input id="linkin" placeholder="Paste link here" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <button class="btn" data-act="open-link">Open</button>
       </div>
-      <details><summary>…or paste text</summary>
-        <textarea id="importtext" rows="6" placeholder="Paste .ics, CSV (title,date,start,end,room,type…) or JSON"></textarea>
-        <button class="btn" data-act="import-paste">Import pasted text</button>
-      </details>
-      <label class="check"><input type="checkbox" id="importstar" checked> Add imported items to my schedule (★)</label>
+      ${navigator.clipboard?.readText ? '<button class="link" data-act="paste-link">📋 Paste from clipboard</button>' : ''}
+    </section>
+
+    <section>
+      <h2>Backup &amp; move to another device</h2>
+      <p class="hint">Your stars, notes and your own events live on this phone. Make a backup link and keep it somewhere safe (send it to yourself, or put it in Notes). Opening that link restores everything, on this phone or a new one.</p>
+      <div class="row wrap">
+        <button class="btn primary" data-act="backup-link">💾 Copy backup link</button>
+      </div>
+      <p class="hint" id="persistinfo"></p>
     </section>
 
     <section>
@@ -425,18 +479,27 @@ function viewMore() {
         ${c.programUrl ? `<a class="btn" href="${esc(c.programUrl)}" target="_blank" rel="noopener">Official program ↗</a>` : ''}
         ${c.venueMap ? `<a class="btn" href="${esc(c.venueMap)}" target="_blank" rel="noopener">🗺️ Venue map</a>` : ''}
       </div>
-      <p class="hint">Program data: ${master.sessions.length} sessions${master.updated ? `, updated ${esc(master.updated)}` : ''}. <button class="link" data-act="refresh">Check for updates</button></p>
+      <p class="hint">Program: ${master.sessions.length} sessions &amp; talks${master.source ? ` from the ${esc(master.source)}` : ''}${master.updated ? `, updated ${esc(master.updated)}` : ''}. <button class="link" data-act="refresh">Check for updates</button></p>
     </section>
 
     <section>
       <h2>Settings</h2>
       <label>Theme<select id="theme">${['auto', 'light', 'dark'].map((t) => `<option ${store.settings.theme === t ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
       <div class="row wrap">
-        <button class="btn" data-act="backup">⬇️ Backup my data</button>
         <button class="btn danger ghost" data-act="reset">Clear my data</button>
       </div>
-      <p class="hint">Your picks and notes are stored only on this device. Tip: use “Add to Home Screen” so it opens instantly and works offline.</p>
     </section>
+
+    <details class="adv"><summary>Advanced: import a calendar or spreadsheet</summary>
+      <section>
+        <p class="hint">Add sessions from an .ics, .csv or JSON file, or paste the text.</p>
+        <label class="btn file">📂 Choose file<input type="file" id="importfile" accept=".ics,.csv,.tsv,.json,.txt,text/calendar,text/csv,application/json" hidden></label>
+        <textarea id="importtext" rows="4" placeholder="…or paste .ics / CSV / JSON text"></textarea>
+        <button class="btn" data-act="import-paste">Import pasted text</button>
+        <label class="check"><input type="checkbox" id="importstar" checked> Add imported items to my schedule (★)</label>
+        <button class="btn" data-act="backup">⬇️ Download backup file</button>
+      </section>
+    </details>
   </div>`;
 }
 
@@ -453,7 +516,7 @@ function openDetail(id) {
   sheet.innerHTML = `<div class="sheet t-${s.type}" data-id="${id}">
     <div class="grab"></div>
     <button class="x" data-act="close" aria-label="Close">✕</button>
-    <span class="type">${esc(TYPES[s.type] || 'Other')}${s.track ? ` · ${esc(s.track)}` : ''}</span>
+    <span class="type">${esc(s.cat || TYPES[s.type] || 'Other')}</span>
     <h2>${esc(s.title)}</h2>
     <p class="when">🕒 ${esc(dayLabel(s.date, true))} · ${fmtTime(s.start)}–${fmtTime(s.end)} <small>(${fmtDur(toMin(s.end) - toMin(s.start))})</small></p>
     ${s.room ? `<p class="when">📍 ${esc(s.room)}</p>` : ''}
@@ -467,7 +530,13 @@ function openDetail(id) {
       ${s.url ? `<a class="btn" href="${esc(s.url)}" target="_blank" rel="noopener">Details ↗</a>` : ''}
       ${s.mine ? `<a class="btn ghost" href="#/edit/${id}">Edit</a>` : ''}
     </div>
+    ${s.parent && index.get(s.parent) ? `<p class="when">📂 Part of <a href="#" data-open="${s.parent}">${esc(index.get(s.parent).title)}</a></p>` : ''}
+    ${s.track ? `<p class="hint">🏷️ ${esc(s.track)}</p>` : ''}
     ${s.description ? `<div class="desc">${esc(s.description).replace(/\n/g, '<br>')}</div>` : ''}
+    ${children.get(id) ? `<h3 class="talkhead">Talks in this session (${children.get(id).length})</h3><div class="talks">${children.get(id).map((k) => {
+      const ks = starred().has(k.id);
+      return `<div class="talk ${ks ? 'starred' : ''}" data-open="${k.id}"><span class="tt">${fmtTime(k.start)}</span><span class="tn">${esc(k.title)}${k.speakers ? `<small>${esc(k.speakers)}</small>` : ''}</span><button class="star" data-star="${k.id}" aria-label="Star talk">${ks ? '★' : '☆'}</button></div>`;
+    }).join('')}</div>` : ''}
     <label class="notes">My notes<textarea id="note" rows="3" placeholder="Questions to ask, people to meet, takeaways…">${esc(store.notes[id] || '')}</textarea></label>
   </div>`;
   if (!sheet.open) sheet.showModal();
@@ -622,7 +691,7 @@ async function refreshMaster(manual = false) {
     const m = await r.json();
     const changed = JSON.stringify(m) !== localStorage.getItem(MASTER_KEY);
     if (changed) {
-      localStorage.setItem(MASTER_KEY, JSON.stringify(m));
+      try { localStorage.setItem(MASTER_KEY, JSON.stringify(m)); } catch { /* the service worker cache still has it */ }
       master = prepMaster(m);
       rebuildIndex();
       if (!ui.day || !confDays().includes(ui.day)) ui.day = defaultDay();
@@ -635,13 +704,43 @@ async function refreshMaster(manual = false) {
   }
 }
 
-async function handleShareHash() {
-  const m = location.hash.match(/#plan=([\w-]+)/);
+async function backupLink() {
+  const code = await encodePlan({ v: 1, starred: store.starred, custom: store.custom, notes: store.notes, friends: store.friends, name: store.settings.name });
+  return `${location.origin}${location.pathname}#restore=${code}`;
+}
+
+async function handleShareHash(src = location.hash) {
+  const r = src.match(/[#&]restore=([\w-]+)/);
+  if (r) {
+    try {
+      const b = await decodePlan(r[1]);
+      ui.pendingRestore = b;
+      if (src === location.hash) history.replaceState(null, '', location.pathname + location.search + '#/my');
+      const sheet = $('#sheet');
+      sheet.innerHTML = `<div class="sheet">
+        <button class="x" data-act="close" aria-label="Close">✕</button>
+        <span class="type">Backup</span>
+        <h2>Restore your schedule?</h2>
+        <p>${(b.starred || []).length} starred · ${(b.custom || []).length} own events · ${Object.keys(b.notes || {}).length} notes · ${(b.friends || []).length} friends</p>
+        <p class="hint">“Merge” keeps what’s already on this device and adds the backup.</p>
+        <div class="row wrap actions">
+          <button class="btn primary" data-act="restore-merge">Merge into this device</button>
+          <button class="btn ghost danger" data-act="restore-replace">Replace everything</button>
+        </div>
+      </div>`;
+      if (!sheet.open) sheet.showModal();
+    } catch (e) {
+      console.error(e);
+      toast('That backup link looks broken');
+    }
+    return true;
+  }
+  const m = src.match(/[#&]plan=([\w-]+)/);
   if (!m) return false;
   try {
     const p = await decodePlan(m[1]);
     ui.pendingShare = p;
-    history.replaceState(null, '', location.pathname + location.search + '#/my');
+    if (src === location.hash) history.replaceState(null, '', location.pathname + location.search + '#/my');
     const name = p.n || 'Someone';
     const count = (p.s || []).length + (p.c || []).length;
     const sheet = $('#sheet');
@@ -656,12 +755,28 @@ async function handleShareHash() {
         <button class="btn" data-act="merge-share">★ Add all to my schedule</button>
       </div>
     </div>`;
-    sheet.showModal();
+    if (!sheet.open) sheet.showModal();
   } catch (e) {
     console.error(e);
     toast('That share link looks broken');
   }
   return true;
+}
+
+function restoreBackup(b, replace) {
+  if (replace) {
+    store = { ...defaults(), settings: store.settings };
+  }
+  const ids = new Set(store.custom.map((x) => x.id));
+  for (const c of b.custom || []) if (!ids.has(c.id)) store.custom.push(c);
+  store.starred = [...new Set([...store.starred, ...(b.starred || [])])];
+  store.notes = { ...(b.notes || {}), ...store.notes };
+  if (replace) store.notes = { ...(b.notes || {}) };
+  for (const f of b.friends || []) if (!store.friends.some((x) => x.name === f.name)) store.friends.push(f);
+  if (b.name && !store.settings.name) store.settings.name = b.name;
+  save();
+  rebuildIndex();
+  toast('✅ Schedule restored');
 }
 
 function saveFriend(p, name) {
@@ -703,7 +818,13 @@ function render() {
   else if (r.name === 'all') view.innerHTML = viewAll();
   else if (r.name === 'add') view.innerHTML = viewAdd();
   else if (r.name === 'edit') view.innerHTML = viewAdd(r.arg);
-  else if (r.name === 'more') view.innerHTML = viewMore();
+  else if (r.name === 'more') {
+    view.innerHTML = viewMore();
+    navigator.storage?.persisted?.().then((p) => {
+      const el = $('#persistinfo');
+      if (el) el.textContent = `${p ? '🔒 Storage is marked persistent on this device.' : ''}${store.settings.lastBackup ? ` Last backup link: ${new Date(store.settings.lastBackup).toLocaleString()}.` : ' No backup link yet.'}`;
+    });
+  }
   document.title = `${conf().name || 'Conference'} Planner`;
   const q = $('#q');
   if (focusedSearch && q) {
@@ -744,6 +865,17 @@ document.addEventListener('click', async (e) => {
     return;
   }
 
+  const tstar = t.closest('[data-star]');
+  if (tstar) {
+    e.stopPropagation();
+    toggleStar(tstar.dataset.star);
+    const on = starred().has(tstar.dataset.star);
+    tstar.textContent = on ? '★' : '☆';
+    tstar.closest('.talk').classList.toggle('starred', on);
+    render();
+    return;
+  }
+
   const open = t.closest('[data-open]');
   if (open) { e.preventDefault(); openDetail(open.dataset.open); return; }
 
@@ -765,6 +897,28 @@ document.addEventListener('click', async (e) => {
         return;
       }
       case 'share': shareMine(); return;
+      case 'backup-link': {
+        const url = await backupLink();
+        try { await navigator.clipboard.writeText(url); toast('Backup link copied — paste it into Notes or send it to yourself'); }
+        catch { shareOrCopy({ title: 'My SC26 planner backup', url }); }
+        store.settings.lastBackup = new Date().toISOString();
+        save();
+        return;
+      }
+      case 'paste-link': {
+        try { $('#linkin').value = await navigator.clipboard.readText(); } catch { toast('Paste it into the box instead'); return; }
+      }
+      // falls through
+      case 'open-link': {
+        const v = $('#linkin').value.trim();
+        if (!(await handleShareHash(v))) toast('That doesn’t look like a planner link');
+        return;
+      }
+      case 'restore-merge': restoreBackup(ui.pendingRestore, false); ui.pendingRestore = null; closeSheet(); location.hash = '#/my'; render(); return;
+      case 'restore-replace':
+        if (!confirm('Replace all stars, notes and events on this device with the backup?')) return;
+        restoreBackup(ui.pendingRestore, true); ui.pendingRestore = null; closeSheet(); location.hash = '#/my'; render(); return;
+      case 'dismiss-tip': store.settings.tipDone = true; save(); render(); return;
       case 'copytext': shareOrCopy({ text: planAsText() }); return;
       case 'ics': exportICS(mySessions(), `${(conf().name || 'conference').toLowerCase()}-my-schedule.ics`); return;
       case 'backup': download(`${(conf().name || 'conf').toLowerCase()}-planner-backup.json`, JSON.stringify(store, null, 2), 'application/json'); return;

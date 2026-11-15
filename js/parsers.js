@@ -296,7 +296,10 @@ const TYPE_ALIASES = [
   ['meeting', /meeting|1:1|1on1|call|meetup/i],
 ];
 
+const KNOWN = new Set(['keynote', 'tutorial', 'workshop', 'paper', 'bof', 'panel', 'poster', 'exhibit', 'social', 'award', 'meeting', 'community', 'student', 'other']);
+
 export function guessType(type, title = '') {
+  if (KNOWN.has(type)) return type;
   for (const src of [type, title]) {
     if (!src) continue;
     for (const [k, re] of TYPE_ALIASES) if (re.test(src)) return k;
@@ -316,6 +319,8 @@ export function normalize(s) {
     speakers: (s.speakers || '').trim(),
     description: (s.description || '').trim(),
     url: (s.url || '').trim(),
+    cat: (s.cat || '').trim(),
+    parent: s.parent || '',
   };
   out.id = s.id || sessionId(out);
   for (const k of Object.keys(out)) if (out[k] === '') delete out[k];
