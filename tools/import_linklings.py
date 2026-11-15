@@ -155,6 +155,9 @@ def main():
     uniq.sort(key=lambda x: (x["date"], x["start"], x.get("parent", ""), x["title"]))
 
     data = json.loads(OUT.read_text()) if OUT.exists() else {}
+    old_n = len(data.get("sessions") or [])
+    if old_n > 200 and len(uniq) < old_n * 0.8:
+        sys.exit(f"Refusing update: only {len(uniq)} items parsed vs {old_n} before (site layout change?)")
     if data.get("sessions") == uniq:
         print(f"no change ({len(uniq)} items)")
         return

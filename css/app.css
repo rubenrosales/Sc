@@ -260,3 +260,7 @@ dialog#sheet[open] { animation: up .18s ease-out; }
 details.adv { margin: 8px 0 14px; }
 details.adv > summary { padding: 6px 2px; }
 details.adv textarea { margin: 8px 0; }
+dialog#sheet { overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+body:has(dialog[open]) { overflow: hidden; }
+#linkout { font-family: ui-monospace, monospace; font-size: 13px; word-break: break-all; margin-top: 8px; }
+.sheet .x { position: sticky; top: 8px; float: right; margin: -4px -8px 0 0; z-index: 2; box-shadow: 0 1px 4px rgba(0,0,0,.15); }

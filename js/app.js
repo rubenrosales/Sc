@@ -24,7 +24,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 // State
 // ------------------------------------------------------------------
 const defaults = () => ({
-  starred: [], custom: [], notes: {}, friends: [],
+  starred: [], custom: [], notes: {}, friends: [], snap: {},
   settings: { theme: 'auto', name: '', hidePast: true },
 });
 let store = load();
@@ -45,7 +45,34 @@ function load() {
   } catch { /* ignore */ }
   return defaults();
 }
+// Keep a copy of every starred program session so it can never silently disappear,
+// and so we can tell the user when its time or room changed.
+const SNAP_KEYS = ['id', 'title', 'date', 'start', 'end', 'room', 'type', 'cat', 'parent', 'url', 'speakers'];
+function snapOf(x) {
+  const o = {};
+  for (const k of SNAP_KEYS) if (x[k]) o[k] = x[k];
+  return o;
+}
+function syncSnaps() {
+  store.snap = store.snap || {};
+  const st = new Set(store.starred);
+  for (const id of Object.keys(store.snap)) if (!st.has(id)) delete store.snap[id];
+  for (const id of st) {
+    const x = index.get(id);
+    if (!store.snap[id] && x && !x.mine && !x.gone && !x.friendOnly) store.snap[id] = snapOf(x);
+  }
+}
+const changeOf = (x) => {
+  const old = store.snap?.[x.id];
+  if (!old || x.gone || x.mine) return '';
+  const parts = [];
+  if (old.date !== x.date || old.start !== x.start || old.end !== x.end) parts.push(`time (was ${dayLabel(old.date).dow} ${fmtTime(old.start)})`);
+  if ((old.room || '') !== (x.room || '')) parts.push(`room (was ${old.room || '—'})`);
+  return parts.join(' and ');
+};
+
 function save() {
+  if (index.size) syncSnaps();
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(store));
   } catch (e) {
@@ -91,6 +118,10 @@ function rebuildIndex() {
   children = new Map();
   for (const s of master.sessions) index.set(s.id, s);
   for (const s of store.custom) index.set(s.id, { ...s, mine: true });
+  // starred sessions that vanished from the program: keep showing our saved copy
+  for (const id of store.starred) {
+    if (!index.has(id) && store.snap?.[id]) index.set(id, { ...store.snap[id], gone: true });
+  }
   for (const f of store.friends) for (const s of f.custom || []) if (!index.has(s.id)) index.set(s.id, { ...s, friendOnly: true });
   for (const s of index.values()) {
     if (s.parent && index.has(s.parent)) {
@@ -224,7 +255,7 @@ function card(s, { conflict = false, showDay = false, n = now() } = {}) {
       <h3>${esc(s.title)}</h3>
       <p class="meta">${meta}</p>
       ${par ? `<p class="parent">in ${esc(par.title)}</p>` : ''}
-      ${kids ? `<span class="pill">${kids.length} talk${kids.length === 1 ? '' : 's'}</span>` : ''}${stt === 'now' ? '<span class="pill live">Now</span>' : ''}${conflict ? '<span class="pill warn">Overlap</span>' : ''}${s.mine ? '<span class="pill">Added by you</span>' : ''}${store.notes[s.id] ? '<span class="pill">📝 Note</span>' : ''}
+      ${kids ? `<span class="pill">${kids.length} talk${kids.length === 1 ? '' : 's'}</span>` : ''}${stt === 'now' ? '<span class="pill live">Now</span>' : ''}${conflict ? '<span class="pill warn">Overlap</span>' : ''}${s.mine ? '<span class="pill">Added by you</span>' : ''}${s.gone ? '<span class="pill warn">Removed from program</span>' : ''}${st && changeOf(s) ? '<span class="pill warn">Changed</span>' : ''}${store.notes[s.id] ? '<span class="pill">📝 Note</span>' : ''}
       ${fr.length ? `<span class="friends">${fr.map((f) => `<b title="${esc(f.name)}">${esc(initials(f.name))}</b>`).join('')}</span>` : ''}
     </div>
     <button class="star" aria-label="${st ? 'Remove from' : 'Add to'} my schedule" aria-pressed="${st}">${st ? '★' : '☆'}</button>
@@ -522,6 +553,8 @@ function openDetail(id) {
     ${s.room ? `<p class="when">📍 ${esc(s.room)}</p>` : ''}
     ${s.speakers ? `<p class="when">👤 ${esc(s.speakers)}</p>` : ''}
     ${fr.length ? `<p class="when">👥 Also going: ${fr.map((f) => esc(f.name)).join(', ')}</p>` : ''}
+    ${st && changeOf(s) ? `<div class="banner warn">⚠️ Organizers changed the ${esc(changeOf(s))}. <button class="link" data-act="ack-change">OK, got it</button></div>` : ''}
+    ${s.gone ? '<div class="banner warn">⚠️ This session is no longer in the official program (cancelled or moved). Check the official site.</div>' : ''}
     ${sameTime.length ? `<div class="banner warn">⚠️ Overlaps with ${sameTime.map((x) => `<a href="#" data-open="${x.id}">${esc(x.title)}</a>`).join(', ')}</div>` : ''}
     <div class="row wrap actions">
       <button class="btn ${st ? '' : 'primary'}" data-act="star">${st ? '★ In my schedule' : '☆ Add to my schedule'}</button>
@@ -578,6 +611,42 @@ function download(name, text, type) {
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 }
 
+function copyText(text) {
+  const done = () => toast('✅ Copied');
+  const fallback = () => {
+    const ta = $('#linkout') || Object.assign(document.createElement('textarea'), { value: text });
+    if (!ta.isConnected) document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch { /* ignore */ }
+    if (ta.id !== 'linkout') ta.remove();
+    ok ? done() : toast('Select the text and copy it manually');
+  };
+  if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(done, fallback);
+  else fallback();
+}
+
+// Shows a link with Copy / Share buttons. Called after async work, so the actual
+// copy/share runs on the user's next tap (iOS requires a fresh tap for both).
+function showLink({ title, url, hint }) {
+  ui.linkOut = { title, url };
+  const sheet = $('#sheet');
+  sheet.innerHTML = `<div class="sheet">
+    <button class="x" data-act="close" aria-label="Close">✕</button>
+    <span class="type">Link ready</span>
+    <h2>${esc(title)}</h2>
+    ${hint ? `<p class="hint">${hint}</p>` : ''}
+    <textarea id="linkout" rows="3" readonly>${esc(url)}</textarea>
+    <div class="row wrap actions">
+      <button class="btn primary" data-act="link-copy">📋 Copy link</button>
+      ${navigator.share ? '<button class="btn" data-act="link-share">📤 Share…</button>' : ''}
+    </div>
+  </div>`;
+  if (!sheet.open) sheet.showModal();
+}
+
 async function shareOrCopy(data) {
   if (navigator.share) {
     try { await navigator.share(data); return; } catch (e) { if (e.name === 'AbortError') return; }
@@ -622,7 +691,11 @@ async function shareMine() {
   const code = await encodePlan({ v: 1, n: store.settings.name || '', s: masterIds, c: custom });
   const url = `${location.origin}${location.pathname}#plan=${code}`;
   const who = store.settings.name ? `${store.settings.name}'s` : 'My';
-  shareOrCopy({ title: `${who} ${conf().name || ''} schedule`, text: `${who} ${conf().name || 'conference'} schedule (${ids.length} sessions)`, url });
+  showLink({
+    title: `${who} ${conf().name || ''} schedule · ${ids.length} sessions`,
+    url,
+    hint: 'Send this to anyone. It shows what you’re attending right now — share again after you change plans.',
+  });
 }
 
 function planAsText() {
@@ -640,7 +713,15 @@ function planAsText() {
 
 function exportICS(list, name) {
   if (!list.length) return toast('Nothing to export');
-  download(name, sessionsToICS(list, { tz: tz(), name: `${conf().name || ''} schedule`, notes: store.notes }), 'text/calendar');
+  const text = sessionsToICS(list, { tz: tz(), name: `${conf().name || ''} schedule`, notes: store.notes });
+  try {
+    const file = new File([text], name, { type: 'text/calendar' });
+    if (navigator.canShare?.({ files: [file] })) {
+      navigator.share({ files: [file], title: name }).catch((e) => { if (e.name !== 'AbortError') download(name, text, 'text/calendar'); });
+      return;
+    }
+  } catch { /* fall back to download */ }
+  download(name, text, 'text/calendar');
 }
 
 function importSessions(sessions, { star = true, label = 'Imported' } = {}) {
@@ -685,6 +766,7 @@ function importText(text, filename = '') {
 }
 
 async function refreshMaster(manual = false) {
+  lastRefresh = Date.now();
   try {
     const r = await fetch('data/schedule.json', { cache: 'no-cache' });
     if (!r.ok) throw new Error(r.status);
@@ -705,7 +787,7 @@ async function refreshMaster(manual = false) {
 }
 
 async function backupLink() {
-  const code = await encodePlan({ v: 1, starred: store.starred, custom: store.custom, notes: store.notes, friends: store.friends, name: store.settings.name });
+  const code = await encodePlan({ v: 1, starred: store.starred, custom: store.custom, notes: store.notes, friends: store.friends, snap: store.snap, name: store.settings.name });
   return `${location.origin}${location.pathname}#restore=${code}`;
 }
 
@@ -774,6 +856,7 @@ function restoreBackup(b, replace) {
   if (replace) store.notes = { ...(b.notes || {}) };
   for (const f of b.friends || []) if (!store.friends.some((x) => x.name === f.name)) store.friends.push(f);
   if (b.name && !store.settings.name) store.settings.name = b.name;
+  store.snap = { ...(b.snap || {}), ...(store.snap || {}) };
   save();
   rebuildIndex();
   toast('✅ Schedule restored');
@@ -899,12 +982,15 @@ document.addEventListener('click', async (e) => {
       case 'share': shareMine(); return;
       case 'backup-link': {
         const url = await backupLink();
-        try { await navigator.clipboard.writeText(url); toast('Backup link copied — paste it into Notes or send it to yourself'); }
-        catch { shareOrCopy({ title: 'My SC26 planner backup', url }); }
+        showLink({ title: 'Your backup link', url, hint: 'Copy it into <b>Notes</b> or send it to yourself. Opening it later restores all your stars, notes and events — on this phone or a new one.' });
         store.settings.lastBackup = new Date().toISOString();
         save();
         return;
       }
+      case 'link-copy': copyText(ui.linkOut.url); return;
+      case 'link-share':
+        navigator.share({ title: ui.linkOut.title, url: ui.linkOut.url }).catch((err) => { if (err.name !== 'AbortError') copyText(ui.linkOut.url); });
+        return;
       case 'paste-link': {
         try { $('#linkin').value = await navigator.clipboard.readText(); } catch { toast('Paste it into the box instead'); return; }
       }
@@ -914,12 +1000,13 @@ document.addEventListener('click', async (e) => {
         if (!(await handleShareHash(v))) toast('That doesn’t look like a planner link');
         return;
       }
+      case 'ack-change': store.snap[sheetId] = snapOf(index.get(sheetId)); save(); openDetail(sheetId); render(); return;
       case 'restore-merge': restoreBackup(ui.pendingRestore, false); ui.pendingRestore = null; closeSheet(); location.hash = '#/my'; render(); return;
       case 'restore-replace':
         if (!confirm('Replace all stars, notes and events on this device with the backup?')) return;
         restoreBackup(ui.pendingRestore, true); ui.pendingRestore = null; closeSheet(); location.hash = '#/my'; render(); return;
       case 'dismiss-tip': store.settings.tipDone = true; save(); render(); return;
-      case 'copytext': shareOrCopy({ text: planAsText() }); return;
+      case 'copytext': copyText(planAsText()); return;
       case 'ics': exportICS(mySessions(), `${(conf().name || 'conference').toLowerCase()}-my-schedule.ics`); return;
       case 'backup': download(`${(conf().name || 'conf').toLowerCase()}-planner-backup.json`, JSON.stringify(store, null, 2), 'application/json'); return;
       case 'reset':
@@ -1051,16 +1138,20 @@ document.addEventListener('touchend', (e) => {
 setInterval(() => {
   if ($('#sheet').open) return;
   if (/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) return;
-  if (['my', 'all'].includes(route().name)) render();
+  if (route().name === 'my') render();
 }, 60_000);
+let lastRefresh = 0;
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') { render(); refreshMaster(); }
+  if (document.visibilityState !== 'visible') return;
+  if (!$('#sheet').open && route().name === 'my') render();
+  if (Date.now() - lastRefresh > 10 * 60_000) refreshMaster();
 });
 
 // ------------------------------------------------------------------
 // Boot
 // ------------------------------------------------------------------
 applyTheme();
+syncSnaps();
 ui.day = defaultDay();
 render();
 handleShareHash();
