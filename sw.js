@@ -5,11 +5,20 @@ const DATA = 'data';
 const ASSETS = [
   './', 'index.html', 'css/app.css', 'js/app.js', 'js/parsers.js',
   'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
-  'data/schedule.json', 'data/details.json',
 ];
+const DATA_FILES = ['data/schedule.json', 'data/details.json'];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(SHELL).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  e.waitUntil((async () => {
+    await (await caches.open(SHELL)).addAll(ASSETS);
+    // Program data lives in its own long-lived cache, refreshed network-first on use.
+    // Only download it here if it isn't cached yet, so app updates stay small.
+    const data = await caches.open(DATA);
+    await Promise.all(DATA_FILES.map(async (f) => {
+      if (!(await data.match(f))) await data.add(f).catch(() => {});
+    }));
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener('activate', (e) => {
@@ -53,7 +62,9 @@ self.addEventListener('fetch', (e) => {
           if (r.ok) { const copy = r.clone(); caches.open(SHELL).then((c) => c.put(e.request, copy)); }
           return r;
         })
-        .catch(() => cached || caches.match('index.html'));
+        .catch(async () => cached
+          || (e.request.mode === 'navigate' && (await caches.match('index.html')))
+          || Response.error());
       return cached || net;
     }),
   );

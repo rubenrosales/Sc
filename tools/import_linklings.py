@@ -214,6 +214,12 @@ def main():
         uniq.append(i)
     uniq.sort(key=lambda x: (x["date"], x["start"], x.get("parent", ""), x["title"]))
 
+    # Sanity check before writing anything (details included).
+    data = json.loads(OUT.read_text()) if OUT.exists() else {}
+    old_n = len(data.get("sessions") or [])
+    if old_n > 200 and len(uniq) < old_n * 0.8:
+        sys.exit(f"Refusing update: only {len(uniq)} items parsed vs {old_n} before (site layout change?)")
+
     # ---- details: session chairs/descriptions (fetched, or carried over from last run)
     old_details = json.loads(DETAILS.read_text()) if DETAILS.exists() else {}
     if a.session_pages:
@@ -230,11 +236,6 @@ def main():
                 if k in old and k not in details[sid]:
                     details[sid][k] = old[k]
     details = {k: v for k, v in details.items() if v and k in seen}
-
-    data = json.loads(OUT.read_text()) if OUT.exists() else {}
-    old_n = len(data.get("sessions") or [])
-    if old_n > 200 and len(uniq) < old_n * 0.8:
-        sys.exit(f"Refusing update: only {len(uniq)} items parsed vs {old_n} before (site layout change?)")
 
     det_text = json.dumps(details, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
     if not DETAILS.exists() or DETAILS.read_text() != det_text:

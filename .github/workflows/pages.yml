@@ -43,7 +43,12 @@ jobs:
           fi
 
       - name: Stamp service-worker cache version
-        run: sed -i "s/const VERSION = 'v1'/const VERSION = '${GITHUB_SHA::8}-${GITHUB_RUN_ID}'/" sw.js
+        # Hash of the app shell only: a program-data sync alone doesn't make every phone
+        # re-download the app (data files are refreshed network-first on their own).
+        run: |
+          v=$(cat index.html manifest.webmanifest css/*.css js/*.js icons/* | sha256sum | cut -c1-12)
+          sed -i "s/const VERSION = 'v1'/const VERSION = '$v'/" sw.js
+          grep -q "const VERSION = '$v'" sw.js
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

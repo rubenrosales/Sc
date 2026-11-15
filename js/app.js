@@ -1,5 +1,5 @@
 import {
-  CONF_TZ, pad, toMin, fromMin, utcToZoned, normalize, sessionId,
+  CONF_TZ, pad, toMin, fromMin, utcToZoned, normalize, sessionId, isValidSession,
   csvToSessions, icsToSessions, sessionsToICS,
 } from './parsers.js';
 
@@ -19,6 +19,33 @@ const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct
 const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// Share links, backup links and backup files come from outside: clean them before use.
+const arr = (v) => (Array.isArray(v) ? v : []);
+const cleanSessions = (v) => arr(v).map(normalize).filter(isValidSession);
+const cleanIds = (v) => [...new Set(arr(v).filter((x) => typeof x === 'string' && /^[\w.:-]{1,80}$/.test(x)))];
+const cleanName = (v) => (typeof v === 'string' ? v.trim().slice(0, 60) : '');
+function cleanFriend(f) {
+  if (!f || typeof f !== 'object') return null;
+  return { name: cleanName(f.name) || 'Friend', ids: cleanIds(f.ids), custom: cleanSessions(f.custom), added: cleanName(f.added) };
+}
+function cleanBackup(b) {
+  b = b && typeof b === 'object' ? b : {};
+  const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+  const notes = {};
+  for (const [k, v] of Object.entries(obj(b.notes))) if (typeof v === 'string' && cleanIds([k]).length) notes[k] = v;
+  const snap = {};
+  for (const [k, v] of Object.entries(obj(b.snap))) {
+    const x = normalize({ ...obj(v), id: k });
+    if (isValidSession(x) && x.id === k) snap[k] = snapOf(x);
+  }
+  return {
+    starred: cleanIds(b.starred), custom: cleanSessions(b.custom), notes, snap,
+    friends: arr(b.friends).map(cleanFriend).filter(Boolean),
+    name: cleanName(b.name ?? b.settings?.name),
+  };
+}
+const cleanShare = (p) => ({ n: cleanName(p?.n), s: cleanIds(p?.s), c: cleanSessions(p?.c) });
 
 // ------------------------------------------------------------------
 // State
@@ -250,7 +277,7 @@ function card(s, { conflict = false, showDay = false, n = now(), ro = false } = 
     `<span>${esc(s.cat || TYPES[s.type] || 'Other')}</span>`,
     s.speakers && `<span class="who">${esc(s.speakers)}</span>`,
   ].filter(Boolean).join('<i>·</i>');
-  return `<article class="card t-${s.type} ${ro ? 'ro' : ''} ${st ? 'starred' : ''} ${stt} ${conflict ? 'conflict' : ''}" data-id="${s.id}" tabindex="0">
+  return `<article class="card t-${s.type} ${ro ? 'ro' : ''} ${st ? 'starred' : ''} ${stt} ${conflict ? 'conflict' : ''}" data-id="${esc(s.id)}" tabindex="0">
     <div class="time">${showDay ? `<b class="dd">${dayLabel(s.date).dow}</b>` : ''}<span>${fmtTime(s.start)}</span><small>${fmtTime(s.end)}</small></div>
     <div class="body">
       <h3>${esc(s.title)}</h3>
@@ -273,7 +300,7 @@ function renderDays() {
   nav.innerHTML = confDays().map((d) => {
     const { dow, num } = dayLabel(d);
     const count = mine.filter((s) => s.date === d).length;
-    return `<button class="day ${d === ui.day ? 'on' : ''} ${d === t ? 'today' : ''}" data-day="${d}" aria-pressed="${d === ui.day}">
+    return `<button class="day ${d === ui.day ? 'on' : ''} ${d === t ? 'today' : ''}" data-day="${esc(d)}" aria-pressed="${d === ui.day}">
       <span>${d === t ? 'Today' : dow}</span><b>${num}</b>${count ? `<i>${count}</i>` : '<i class="z"></i>'}
     </button>`;
   }).join('');
@@ -335,7 +362,8 @@ function viewMy() {
       html += `<div class="gap">☕ ${fmtDur(toMin(s.start) - lastEnd)} free</div>`;
     }
     lastDay = s.date;
-    lastEnd = Math.max(lastEnd ?? 0, toMin(s.end));
+    // All-day blocks (exhibit floor, shuttle) would otherwise hide every gap that day.
+    if (!isBackground(s)) lastEnd = Math.max(lastEnd ?? 0, toMin(s.end));
     html += card(s, { conflict: conflicts.has(s.id), n });
   }
   html += '</div>';
@@ -355,7 +383,8 @@ function nowCard(mine, n) {
   const live = today.filter((s) => status(s, n) === 'now');
   // Prefer specific sessions over all-day background blocks (shuttle, exhibit floor...).
   const cur = live.some((s) => !isBackground(s)) ? live.filter((s) => !isBackground(s)) : live.slice(0, 1);
-  const next = today.find((s) => toMin(s.start) > n.min);
+  const upcoming = today.filter((s) => toMin(s.start) > n.min);
+  const next = upcoming.find((s) => !isBackground(s)) || upcoming[0];
   if (!cur.length && !next) {
     return `<div class="nowcard"><div><small>Right now</small><b>Nothing else planned today</b></div>
       <a class="btn sm" href="#/all" data-act="jump-now">What's on now →</a></div>`;
@@ -363,11 +392,11 @@ function nowCard(mine, n) {
   let h = '<div class="nowcard">';
   for (const s of cur) {
     const left = toMin(s.end) - n.min;
-    h += `<button class="nowitem" data-id="${s.id}"><small>Now · ends in ${fmtDur(left)}</small><b>${esc(s.title)}</b>${s.room ? `<span>📍 ${esc(s.room)}</span>` : ''}</button>`;
+    h += `<button class="nowitem" data-id="${esc(s.id)}"><small>Now · ends in ${fmtDur(left)}</small><b>${esc(s.title)}</b>${s.room ? `<span>📍 ${esc(s.room)}</span>` : ''}</button>`;
   }
   if (next) {
     const inn = toMin(next.start) - n.min;
-    h += `<button class="nowitem next" data-id="${next.id}"><small>Next · ${fmtTime(next.start)} (in ${fmtDur(inn)})</small><b>${esc(next.title)}</b>${next.room ? `<span>📍 ${esc(next.room)}</span>` : ''}</button>`;
+    h += `<button class="nowitem next" data-id="${esc(next.id)}"><small>Next · ${fmtTime(next.start)} (in ${fmtDur(inn)})</small><b>${esc(next.title)}</b>${next.room ? `<span>📍 ${esc(next.room)}</span>` : ''}</button>`;
   }
   return h + '</div>';
 }
@@ -447,7 +476,7 @@ function viewAdd(editId) {
     <p class="hint">For meetings, booth visits, dinners — or any session not in the list.</p>
     <label>Title<input name="title" required value="${esc(s?.title || '')}" placeholder="e.g. Meet with NVIDIA team"></label>
     <div class="grid2">
-      <label>Day<select name="date">${days.map((d) => `<option value="${d}" ${d === day ? 'selected' : ''}>${esc(dayLabel(d, true))}</option>`).join('')}</select></label>
+      <label>Day<select name="date">${days.map((d) => `<option value="${esc(d)}" ${d === day ? 'selected' : ''}>${esc(dayLabel(d, true))}</option>`).join('')}</select></label>
       <label>Start<input name="start" type="time" required value="${start}" step="300"></label>
     </div>
     <label>Duration</label>
@@ -459,18 +488,18 @@ function viewAdd(editId) {
     <label>Link <small>(optional)</small><input name="url" type="url" value="${esc(s?.url || '')}" placeholder="https://"></label>
     <label>Details <small>(optional)</small><textarea name="description" rows="3" placeholder="Who, agenda, contact…">${esc(s?.description || '')}</textarea></label>
     <div class="row end">
-      ${s ? `<button type="button" class="btn danger ghost" data-act="delete" data-id="${s.id}">Delete</button>` : ''}
+      ${s ? `<button type="button" class="btn danger ghost" data-act="delete" data-id="${esc(s.id)}">Delete</button>` : ''}
       <button class="btn primary" type="submit">${s ? 'Save' : 'Add to my schedule'}</button>
     </div>
-    <input type="hidden" name="editId" value="${s?.id || ''}">
+    <input type="hidden" name="editId" value="${esc(s?.id || '')}">
   </form>`;
 }
 
 // What someone sees when they open a shared link: a clean, read-only schedule.
 function sharedItems() {
   const p = ui.shared;
-  const custom = (p.c || []).map((c) => ({ ...normalize(c), mine: true }));
-  const ids = new Set(p.s || []);
+  const custom = p.c.map((c) => ({ ...c, mine: true }));
+  const ids = new Set(p.s);
   const list = [...custom];
   for (const id of ids) if (index.has(id) && !index.get(id).mine) list.push(index.get(id));
   return list.sort(sortByTime);
@@ -497,8 +526,8 @@ function viewShared() {
   const next = today.find((x) => toMin(x.start) > n.min && !isBackground(x));
   if (cur.length || next) {
     html += '<div class="nowcard">';
-    for (const x of cur) html += `<button class="nowitem" data-id="${x.id}"><small>${esc(first)} is at · until ${fmtTime(x.end)}</small><b>${esc(x.title)}</b>${x.room ? `<span>📍 ${esc(x.room)}</span>` : ''}</button>`;
-    if (next) html += `<button class="nowitem next" data-id="${next.id}"><small>Next · ${fmtTime(next.start)}</small><b>${esc(next.title)}</b>${next.room ? `<span>📍 ${esc(next.room)}</span>` : ''}</button>`;
+    for (const x of cur) html += `<button class="nowitem" data-id="${esc(x.id)}"><small>${esc(first)} is at · until ${fmtTime(x.end)}</small><b>${esc(x.title)}</b>${x.room ? `<span>📍 ${esc(x.room)}</span>` : ''}</button>`;
+    if (next) html += `<button class="nowitem next" data-id="${esc(next.id)}"><small>Next · ${fmtTime(next.start)}</small><b>${esc(next.title)}</b>${next.room ? `<span>📍 ${esc(next.room)}</span>` : ''}</button>`;
     html += '</div>';
   }
 
@@ -620,7 +649,9 @@ function peopleList(title, list) {
 }
 
 function openDetail(id, { keepStack = false, keepScroll = false } = {}) {
-  const s = index.get(id);
+  // Items someone added themselves to a shared schedule exist only in the link.
+  const own = ui.shared?.c.find((x) => x.id === id);
+  const s = own ? { ...own, mine: true } : index.get(id);
   if (!s) return;
   const sheet = $('#sheet');
   const prev = $('.sheet[data-id]', sheet)?.dataset.id;
@@ -629,9 +660,10 @@ function openDetail(id, { keepStack = false, keepScroll = false } = {}) {
     else if (!sheet.open) ui.sheetStack = [];
   }
   const scrollY = sheet.scrollTop;
+  const ro = !!ui.shared;
   const st = starred().has(id);
   const fr = friendsFor(id);
-  const d = det(id);
+  const d = s.mine ? {} : det(id);
   const sameTime = isBackground(s) ? [] : mySessions().filter((x) => x.id !== id && !isBackground(x) && x.date === s.date && toMin(x.start) < toMin(s.end) && toMin(s.start) < toMin(x.end));
   const par = s.parent && index.get(s.parent);
   const kids = children.get(id);
@@ -641,9 +673,8 @@ function openDetail(id, { keepStack = false, keepScroll = false } = {}) {
   const back = ui.sheetStack.length ? index.get(ui.sheetStack[ui.sheetStack.length - 1]) : null;
   const pending = !s.mine && detailsState !== 'ok';
   if (detailsState === 'idle') loadDetails();
-  const ro = !!ui.shared;
 
-  sheet.innerHTML = `<div class="sheet t-${s.type}" data-id="${id}">
+  sheet.innerHTML = `<div class="sheet t-${s.type}" data-id="${esc(id)}">
     <div class="grab"></div>
     <button class="x" data-act="close" aria-label="Close">✕</button>
     ${back ? `<button class="link back" data-act="back">‹ ${esc(back.title.length > 40 ? back.title.slice(0, 40) + '…' : back.title)}</button>` : ''}
@@ -651,16 +682,16 @@ function openDetail(id, { keepStack = false, keepScroll = false } = {}) {
     <h2>${esc(s.title)}</h2>
     <p class="when">🕒 ${esc(dayLabel(s.date, true))} · ${fmtTime(s.start)}–${fmtTime(s.end)} <small>(${fmtDur(toMin(s.end) - toMin(s.start))})</small></p>
     ${s.room ? `<p class="when">📍 <b>${esc(s.room)}</b></p>` : ''}
-    ${par ? `<p class="when">📂 Part of <a href="#" data-open="${s.parent}">${esc(par.title)}</a></p>` : ''}
+    ${par ? `<p class="when">📂 Part of <a href="#" data-open="${esc(s.parent)}">${esc(par.title)}</a></p>` : ''}
     ${!ro && fr.length ? `<p class="when">👥 Also going: ${fr.map((f) => esc(f.name)).join(', ')}</p>` : ''}
     ${!ro && st && changeOf(s) ? `<div class="banner warn">⚠️ Organizers changed the ${esc(changeOf(s))}. <button class="link" data-act="ack-change">OK, got it</button></div>` : ''}
     ${s.gone ? '<div class="banner warn">⚠️ This session is no longer in the official program (cancelled or moved). Check the official site.</div>' : ''}
-    ${!ro && sameTime.length ? `<div class="banner warn">⚠️ Overlaps with ${sameTime.map((x) => `<a href="#" data-open="${x.id}">${esc(x.title)}</a>`).join(', ')}</div>` : ''}
+    ${!ro && sameTime.length ? `<div class="banner warn">⚠️ Overlaps with ${sameTime.map((x) => `<a href="#" data-open="${esc(x.id)}">${esc(x.title)}</a>`).join(', ')}</div>` : ''}
     <div class="row wrap actions" ${ro ? 'hidden' : ''}>
       <button class="btn ${st ? '' : 'primary'}" data-act="star">${st ? '★ In my schedule' : '☆ Add to my schedule'}</button>
       <button class="btn" data-act="ics1">📅 Calendar</button>
       ${navigator.share ? '<button class="btn" data-act="share1">Share</button>' : ''}
-      ${s.mine ? `<a class="btn ghost" href="#/edit/${id}">Edit</a>` : ''}
+      ${s.mine && !ro ? `<a class="btn ghost" href="#/edit/${encodeURIComponent(id)}">Edit</a>` : ''}
     </div>
     <div class="facts">
       ${d.reg ? `<span class="fact">🎫 ${d.reg.map(esc).join(' · ')}</span>` : ''}
@@ -675,7 +706,7 @@ function openDetail(id, { keepStack = false, keepScroll = false } = {}) {
     ${pending ? `<p class="hint">${detailsState === 'fail' ? '📶 Full description and speaker details need a connection once — they’ll be saved for offline after that.' : 'Loading full details…'}</p>` : ''}
     ${kids ? `<h3 class="talkhead">Talks in this session (${kids.length})</h3><div class="talks">${kids.map((k) => {
       const ks = starred().has(k.id);
-      return `<div class="talk ${ks && !ro ? 'starred' : ''} ${ro ? 'ro' : ''}" data-open="${k.id}"><span class="tt">${fmtTime(k.start)}<small>${fmtTime(k.end)}</small></span><span class="tn">${esc(k.title)}${k.speakers ? `<small>${esc(k.speakers)}</small>` : ''}</span>${ro ? '' : `<button class="star" data-star="${k.id}" aria-label="Star talk">${ks ? '★' : '☆'}</button>`}</div>`;
+      return `<div class="talk ${ks && !ro ? 'starred' : ''} ${ro ? 'ro' : ''}" data-open="${esc(k.id)}"><span class="tt">${fmtTime(k.start)}<small>${fmtTime(k.end)}</small></span><span class="tn">${esc(k.title)}${k.speakers ? `<small>${esc(k.speakers)}</small>` : ''}</span>${ro ? '' : `<button class="star" data-star="${esc(k.id)}" aria-label="Star talk">${ks ? '★' : '☆'}</button>`}</div>`;
     }).join('')}</div><p class="hint">Tap a talk for its abstract and speakers.</p>` : ''}
     <label class="notes" ${ro ? 'hidden' : ''}>My notes<textarea id="note" rows="3" placeholder="Questions to ask, people to meet, takeaways…">${esc(store.notes[id] || '')}</textarea></label>
     ${s.url ? `<p class="center"><a href="${esc(s.url)}" target="_blank" rel="noopener">Open on the official SC26 site ↗</a></p>` : ''}
@@ -771,7 +802,11 @@ async function shareOrCopy(data) {
 }
 
 // --- share link encoding (base64url of deflated JSON) ---
-const b64u = (bytes) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const b64u = (bytes) => {
+  let bin = ''; // chunked: spreading a large array into fromCharCode overflows the stack
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+};
 const unb64u = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
 
 async function streamBytes(bytes, stream) {
@@ -837,12 +872,13 @@ function exportICS(list, name) {
 }
 
 function importSessions(sessions, { star = true, label = 'Imported' } = {}) {
+  sessions = cleanSessions(sessions);
   if (!sessions.length) return toast('No sessions found in that file');
   const existing = new Set(index.keys());
   let added = 0, starredN = 0;
   const st = new Set(store.starred);
   for (const s of sessions) {
-    const n = normalize(s);
+    const n = s;
     if (!existing.has(n.id)) { store.custom.push(n); existing.add(n.id); added++; }
     if (star && !st.has(n.id)) { st.add(n.id); starredN++; }
   }
@@ -863,8 +899,10 @@ function importText(text, filename = '') {
       const j = JSON.parse(t);
       if (j && j.starred && j.settings) { // backup file
         if (!confirm('Restore this backup? It replaces your current picks and notes.')) return;
-        store = { ...defaults(), ...j };
-        save(); rebuildIndex(); toast('Backup restored'); return render();
+        const keep = store.settings;
+        restoreBackup(cleanBackup(j), true);
+        store.settings = { ...keep, ...pickSettings(j.settings) };
+        save(); applyTheme(); return render();
       }
       const arr = Array.isArray(j) ? j : j.sessions || [];
       return importSessions(arr.filter((s) => s.title && s.date && s.start), { star });
@@ -877,16 +915,20 @@ function importText(text, filename = '') {
   }
 }
 
+let masterRaw; // last program JSON seen (even if it couldn't be stored)
 async function refreshMaster(manual = false) {
   lastRefresh = Date.now();
   try {
     const r = await fetch('data/schedule.json', { cache: 'no-cache' });
     if (!r.ok) throw new Error(r.status);
     const m = await r.json();
-    const changed = JSON.stringify(m) !== localStorage.getItem(MASTER_KEY);
+    const raw = JSON.stringify(m);
+    if (masterRaw === undefined) masterRaw = localStorage.getItem(MASTER_KEY);
+    const changed = raw !== masterRaw;
     if (changed) {
+      masterRaw = raw;
       if (!ui.shared || store.starred.length) {
-        try { localStorage.setItem(MASTER_KEY, JSON.stringify(m)); } catch { /* the service worker cache still has it */ }
+        try { localStorage.setItem(MASTER_KEY, raw); } catch { /* the service worker cache still has it */ }
       }
       master = prepMaster(m);
       rebuildIndex();
@@ -910,7 +952,7 @@ async function handleShareHash(src = location.hash) {
   const r = src.match(/[#&]restore=([\w-]+)/);
   if (r) {
     try {
-      const b = await decodePlan(r[1]);
+      const b = cleanBackup(await decodePlan(r[1]));
       ui.pendingRestore = b;
       if (src === location.hash) history.replaceState(null, '', location.pathname + location.search + '#/my');
       const sheet = $('#sheet');
@@ -918,7 +960,7 @@ async function handleShareHash(src = location.hash) {
         <button class="x" data-act="close" aria-label="Close">✕</button>
         <span class="type">Backup</span>
         <h2>Restore your schedule?</h2>
-        <p>${(b.starred || []).length} starred · ${(b.custom || []).length} own events · ${Object.keys(b.notes || {}).length} notes · ${(b.friends || []).length} friends</p>
+        <p>${b.starred.length} starred · ${b.custom.length} own events · ${Object.keys(b.notes).length} notes · ${b.friends.length} friends</p>
         <p class="hint">“Merge” keeps what’s already on this device and adds the backup.</p>
         <div class="row wrap actions">
           <button class="btn primary" data-act="restore-merge">Merge into this device</button>
@@ -936,7 +978,7 @@ async function handleShareHash(src = location.hash) {
   if (!m) return false;
   if (src === location.hash) {
     try {
-      ui.shared = await decodePlan(m[1]);
+      ui.shared = cleanShare(await decodePlan(m[1]));
       closeSheet();
       render();
       window.scrollTo({ top: 0 });
@@ -947,11 +989,10 @@ async function handleShareHash(src = location.hash) {
     return true;
   }
   try {
-    const p = await decodePlan(m[1]);
+    const p = cleanShare(await decodePlan(m[1]));
     ui.pendingShare = p;
-    if (src === location.hash) history.replaceState(null, '', location.pathname + location.search + '#/my');
     const name = p.n || 'Someone';
-    const count = (p.s || []).length + (p.c || []).length;
+    const count = p.s.length + p.c.length;
     const sheet = $('#sheet');
     sheet.innerHTML = `<div class="sheet">
       <button class="x" data-act="close" aria-label="Close">✕</button>
@@ -972,27 +1013,35 @@ async function handleShareHash(src = location.hash) {
   return true;
 }
 
+function pickSettings(o) {
+  const d = defaults().settings, out = {};
+  for (const k of [...Object.keys(d), 'tipDone', 'lastBackup']) if (o && o[k] != null && (d[k] == null || typeof o[k] === typeof d[k])) out[k] = o[k];
+  if (out.theme && !['auto', 'light', 'dark'].includes(out.theme)) delete out.theme;
+  return out;
+}
+
+// b must come from cleanBackup().
 function restoreBackup(b, replace) {
   if (replace) {
     store = { ...defaults(), settings: store.settings };
   }
   const ids = new Set(store.custom.map((x) => x.id));
-  for (const c of b.custom || []) if (!ids.has(c.id)) store.custom.push(c);
-  store.starred = [...new Set([...store.starred, ...(b.starred || [])])];
-  store.notes = { ...(b.notes || {}), ...store.notes };
-  if (replace) store.notes = { ...(b.notes || {}) };
-  for (const f of b.friends || []) if (!store.friends.some((x) => x.name === f.name)) store.friends.push(f);
+  for (const c of b.custom) if (!ids.has(c.id)) store.custom.push(c);
+  store.starred = [...new Set([...store.starred, ...b.starred])];
+  store.notes = { ...b.notes, ...store.notes };
+  for (const f of b.friends) if (!store.friends.some((x) => x.name === f.name)) store.friends.push(f);
   if (b.name && !store.settings.name) store.settings.name = b.name;
-  store.snap = { ...(b.snap || {}), ...(store.snap || {}) };
+  store.snap = { ...b.snap, ...(store.snap || {}) };
   save();
   rebuildIndex();
   toast('✅ Schedule restored');
 }
 
+// p must come from cleanShare().
 function saveFriend(p, name) {
-  const custom = (p.c || []).map(normalize);
-  const ids = [...(p.s || []), ...custom.map((s) => s.id)];
-  const f = { name: name || p.n || 'Friend', ids, custom, added: new Date().toISOString().slice(0, 10) };
+  const custom = p.c;
+  const ids = [...new Set([...p.s, ...custom.map((s) => s.id)])];
+  const f = { name: cleanName(name) || p.n || 'Friend', ids, custom, added: new Date().toISOString().slice(0, 10) };
   const i = store.friends.findIndex((x) => x.name.toLowerCase() === f.name.toLowerCase());
   if (i >= 0) store.friends[i] = f; else store.friends.push(f);
   save();
@@ -1001,7 +1050,8 @@ function saveFriend(p, name) {
 }
 
 function mergeIds(ids, custom = []) {
-  for (const s of custom) if (!index.has(s.id) || index.get(s.id).friendOnly) store.custom.push(normalize(s));
+  custom = cleanSessions(custom);
+  for (const s of custom) if (!index.has(s.id) || index.get(s.id).friendOnly) store.custom.push(s);
   store.starred = [...new Set([...store.starred, ...ids])];
   save();
   rebuildIndex();
@@ -1034,7 +1084,7 @@ function render() {
   if (r.name === 'my') view.innerHTML = viewMy();
   else if (r.name === 'all') view.innerHTML = viewAll();
   else if (r.name === 'add') view.innerHTML = viewAdd();
-  else if (r.name === 'edit') view.innerHTML = viewAdd(r.arg);
+  else if (r.name === 'edit') view.innerHTML = viewAdd(decodeURIComponent(r.arg || ''));
   else if (r.name === 'more') {
     view.innerHTML = viewMore();
     navigator.storage?.persisted?.().then((p) => {
@@ -1161,6 +1211,7 @@ document.addEventListener('click', async (e) => {
         if (!confirm('Delete this item?')) return;
         store.custom = store.custom.filter((s) => s.id !== id);
         store.starred = store.starred.filter((x) => x !== id);
+        delete store.notes[id];
         save(); rebuildIndex(); location.hash = '#/my'; toast('Deleted');
         return;
       }
@@ -1176,7 +1227,7 @@ document.addEventListener('click', async (e) => {
       }
       case 'merge-share': {
         const p = ui.pendingShare;
-        mergeIds([...(p.s || []), ...(p.c || []).map((s) => normalize(s).id)], p.c || []);
+        mergeIds([...p.s, ...p.c.map((s) => s.id)], p.c);
         ui.pendingShare = null; closeSheet(); render();
         return;
       }

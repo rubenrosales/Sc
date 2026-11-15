@@ -307,22 +307,39 @@ export function guessType(type, title = '') {
   return type ? 'other' : 'other';
 }
 
+// Sessions can arrive from share/backup links and imported files, so every field is
+// coerced to a safe shape: strict date/time formats, plain ids, http(s)-only links.
+const str = (v) => (v == null ? '' : String(v)).trim();
+const cleanDate = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(str(v)) ? str(v) : undefined);
+const cleanTime = (v) => {
+  const m = str(v).match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  return m && +m[1] < 24 && +m[2] < 60 ? `${pad(+m[1])}:${m[2]}` : undefined;
+};
+const cleanId = (v) => str(v).replace(/[^\w.:-]/g, '').slice(0, 80);
+const cleanUrl = (v) => (/^https?:\/\//i.test(str(v)) ? str(v) : '');
+
+// A session is usable only with a title, a valid day and a valid start time.
+export const isValidSession = (s) => !!(s && s.title && s.date && s.start);
+
 export function normalize(s) {
+  s = s || {};
+  const start = cleanTime(s.start);
+  const end = cleanTime(s.end);
   const out = {
-    title: String(s.title || '').trim(),
-    date: s.date,
-    start: s.start,
-    end: s.end && toMin(s.end) > toMin(s.start) ? s.end : fromMin(Math.min(toMin(s.start) + 60, 1439)),
-    room: (s.room || '').trim(),
-    type: guessType(s.type, s.title),
-    track: (s.track || '').trim(),
-    speakers: (s.speakers || '').trim(),
-    description: (s.description || '').trim(),
-    url: (s.url || '').trim(),
-    cat: (s.cat || '').trim(),
-    parent: s.parent || '',
+    title: str(s.title),
+    date: cleanDate(s.date),
+    start,
+    end: end && start && toMin(end) > toMin(start) ? end : fromMin(Math.min(toMin(start) + 60, 1439)),
+    room: str(s.room),
+    type: guessType(str(s.type), str(s.title)),
+    track: str(s.track),
+    speakers: str(s.speakers),
+    description: str(s.description),
+    url: cleanUrl(s.url),
+    cat: str(s.cat),
+    parent: cleanId(s.parent),
   };
-  out.id = s.id || sessionId(out);
-  for (const k of Object.keys(out)) if (out[k] === '') delete out[k];
+  out.id = cleanId(s.id) || sessionId(out);
+  for (const k of Object.keys(out)) if (out[k] === '' || out[k] === undefined) delete out[k];
   return out;
 }
