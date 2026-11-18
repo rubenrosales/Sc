@@ -1,7 +1,11 @@
 import {
-  CONF_TZ, pad, toMin, fromMin, utcToZoned, normalize, sessionId, isValidSession,
+  CONF_TZ, pad, toMin, fromMin, utcToZoned, zonedToUtc, normalize, sessionId, isValidSession,
   csvToSessions, icsToSessions, sessionsToICS,
 } from './parsers.js';
+import {
+  photosSupported, makePhoto, putPhoto, getPhoto, deletePhoto, allPhotoKeys, photoURL,
+  hydratePhotos, exportPhotos, importPhotos,
+} from './photos.js';
 
 // ------------------------------------------------------------------
 // Constants
@@ -16,6 +20,17 @@ const TYPES = {
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+// Note kinds. Photos ('p') are added with the camera button, not picked as a kind.
+const KINDS = {
+  n: { icon: '✎', label: 'Note', ph: 'Jot a thought…' },
+  i: { icon: '💡', label: 'Takeaway', ph: 'The key takeaway…' },
+  q: { icon: '❓', label: 'Question', ph: 'A question to ask…' },
+  t: { icon: '☐', label: 'To-do', ph: 'Follow up on… (paper, person, repo)' },
+  p: { icon: '📷', label: 'Photo', ph: '' },
+};
+const RATE = ['How was it?', 'Not for me', 'Okay', 'Good', 'Great', 'Outstanding'];
+const rid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
 const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -25,22 +40,55 @@ const arr = (v) => (Array.isArray(v) ? v : []);
 const cleanSessions = (v) => arr(v).map(normalize).filter(isValidSession);
 const cleanIds = (v) => [...new Set(arr(v).filter((x) => typeof x === 'string' && /^[\w.:-]{1,80}$/.test(x)))];
 const cleanName = (v) => (typeof v === 'string' ? v.trim().slice(0, 60) : '');
+const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+const okKey = (v) => typeof v === 'string' && /^[\w-]{1,40}$/.test(v);
+function cleanJournal(v) {
+  const out = {};
+  for (const [id, j0] of Object.entries(obj(v))) {
+    if (!cleanIds([id]).length) continue;
+    const j = obj(j0);
+    const e = arr(j.e).map((x) => {
+      x = obj(x);
+      if (!KINDS[x.k] || !okKey(x.id)) return null;
+      const o = { id: x.id, t: Number.isFinite(x.t) ? x.t : null, k: x.k, x: typeof x.x === 'string' ? x.x.slice(0, 5000) : '' };
+      if (x.d) o.d = 1;
+      if (x.k === 'p') { if (!okKey(x.p)) return null; o.p = x.p; } else if (!o.x.trim()) return null;
+      return o;
+    }).filter(Boolean).slice(0, 1000);
+    const o = { e };
+    if (typeof j.a === 'boolean') o.a = j.a;
+    if (Number.isInteger(j.r) && j.r >= 1 && j.r <= 5) o.r = j.r;
+    if (j.m) {
+      const m = normalize({ ...obj(j.m), id });
+      if (isValidSession(m) && m.id === id) o.m = snapOf(m);
+    }
+    if (o.e.length || o.a !== undefined || o.r) out[id] = o;
+  }
+  return out;
+}
+// Older versions kept one plain-text note per session.
+function mergeLegacyNotes(journal, notes) {
+  for (const [id, v] of Object.entries(obj(notes))) {
+    if (typeof v !== 'string' || !v.trim() || !cleanIds([id]).length) continue;
+    const j = journal[id] || (journal[id] = { e: [] });
+    if (!j.e.some((e) => e.x === v)) j.e.unshift({ id: rid(), t: null, k: 'n', x: v.slice(0, 5000) });
+  }
+  return journal;
+}
 function cleanFriend(f) {
   if (!f || typeof f !== 'object') return null;
   return { name: cleanName(f.name) || 'Friend', ids: cleanIds(f.ids), custom: cleanSessions(f.custom), added: cleanName(f.added) };
 }
 function cleanBackup(b) {
   b = b && typeof b === 'object' ? b : {};
-  const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
-  const notes = {};
-  for (const [k, v] of Object.entries(obj(b.notes))) if (typeof v === 'string' && cleanIds([k]).length) notes[k] = v;
+  const journal = mergeLegacyNotes(cleanJournal(b.journal), b.notes);
   const snap = {};
   for (const [k, v] of Object.entries(obj(b.snap))) {
     const x = normalize({ ...obj(v), id: k });
     if (isValidSession(x) && x.id === k) snap[k] = snapOf(x);
   }
   return {
-    starred: cleanIds(b.starred), custom: cleanSessions(b.custom), notes, snap,
+    starred: cleanIds(b.starred), custom: cleanSessions(b.custom), journal, snap,
     friends: arr(b.friends).map(cleanFriend).filter(Boolean),
     name: cleanName(b.name ?? b.settings?.name),
   };
@@ -51,7 +99,7 @@ const cleanShare = (p) => ({ n: cleanName(p?.n), s: cleanIds(p?.s), c: cleanSess
 // State
 // ------------------------------------------------------------------
 const defaults = () => ({
-  starred: [], custom: [], notes: {}, friends: [], snap: {},
+  starred: [], custom: [], journal: {}, drafts: {}, friends: [], snap: {},
   settings: { theme: 'auto', name: '', hidePast: true },
 });
 let store = load();
@@ -72,6 +120,11 @@ function load() {
     if (s) return { ...defaults(), ...s, settings: { ...defaults().settings, ...s.settings } };
   } catch { /* ignore */ }
   return defaults();
+}
+function migrate() {
+  store.journal = cleanJournal(store.journal);
+  store.drafts = obj(store.drafts);
+  if (store.notes) { mergeLegacyNotes(store.journal, store.notes); delete store.notes; }
 }
 // Keep a copy of every starred program session so it can never silently disappear,
 // and so we can tell the user when its time or room changed.
@@ -165,6 +218,7 @@ function rebuildIndex() {
   }
   for (const list of children.values()) list.sort(sortByTime);
 }
+migrate();
 rebuildIndex();
 
 const allSessions = () => [...index.values()].filter((s) => !s.friendOnly);
@@ -283,7 +337,7 @@ function card(s, { conflict = false, showDay = false, n = now(), ro = false } = 
       <h3>${esc(s.title)}</h3>
       <p class="meta">${meta}</p>
       ${par ? `<p class="parent">in ${esc(par.title)}</p>` : ''}
-      ${kids ? `<span class="pill">${kids.length} talk${kids.length === 1 ? '' : 's'}</span>` : ''}${stt === 'now' ? '<span class="pill live">Now</span>' : ''}${conflict ? '<span class="pill warn">Overlap</span>' : ''}${s.mine && !ro ? '<span class="pill">Added by you</span>' : ''}${s.gone ? '<span class="pill warn">Removed from program</span>' : ''}${st && changeOf(s) ? '<span class="pill warn">Changed</span>' : ''}${!ro && store.notes[s.id] ? '<span class="pill">📝 Note</span>' : ''}
+      ${kids ? `<span class="pill">${kids.length} talk${kids.length === 1 ? '' : 's'}</span>` : ''}${stt === 'now' ? '<span class="pill live">Now</span>' : ''}${conflict ? '<span class="pill warn">Overlap</span>' : ''}${s.mine && !ro ? '<span class="pill">Added by you</span>' : ''}${s.gone ? '<span class="pill warn">Removed from program</span>' : ''}${st && changeOf(s) ? '<span class="pill warn">Changed</span>' : ''}${!ro && store.journal[s.id]?.a === true ? '<span class="pill went">✓ Went</span>' : ''}${!ro && store.journal[s.id]?.e.length ? `<span class="pill note">✎ ${store.journal[s.id].e.length}</span>` : ''}
       ${fr.length ? `<span class="friends">${fr.map((f) => `<b title="${esc(f.name)}">${esc(initials(f.name))}</b>`).join('')}</span>` : ''}
     </div>
     ${ro ? '' : `<button class="star" aria-label="${st ? 'Remove from' : 'Add to'} my schedule" aria-pressed="${st}">${st ? '★' : '☆'}</button>`}
@@ -392,7 +446,9 @@ function nowCard(mine, n) {
   let h = '<div class="nowcard">';
   for (const s of cur) {
     const left = toMin(s.end) - n.min;
-    h += `<button class="nowitem" data-id="${esc(s.id)}"><small>Now · ends in ${fmtDur(left)}</small><b>${esc(s.title)}</b>${s.room ? `<span>📍 ${esc(s.room)}</span>` : ''}</button>`;
+    const nn = timelineFor(s.id).length;
+    h += `<div class="nowrow"><button class="nowitem" data-id="${esc(s.id)}"><small>Now · ends in ${fmtDur(left)}</small><b>${esc(s.title)}</b>${s.room ? `<span>📍 ${esc(s.room)}</span>` : ''}</button>
+      <a class="nownote" href="${noteHref(s.id)}" aria-label="Take notes on ${esc(s.title)}"><span>✎</span>${nn ? `${nn} note${nn === 1 ? '' : 's'}` : 'Notes'}</a></div>`;
   }
   if (next) {
     const inn = toMin(next.start) - n.min;
@@ -613,6 +669,547 @@ function viewMore() {
 }
 
 // ------------------------------------------------------------------
+// Notes: a timestamped notebook per session
+// ------------------------------------------------------------------
+// store.journal[sessionId] = {
+//   a: true | false        attended / skipped (absent = not decided)
+//   r: 1..5                rating
+//   m: {...}               snapshot of the session, so notes outlive program changes
+//   e: [{ id, t, k, x, d, p }]   entries: time (epoch ms), kind, text, done, photo id
+// }
+const noteHref = (id) => `#/note/${encodeURIComponent(id)}`;
+const BOOT = Date.now();
+// Real clock, or the ?now= debug clock (ticking from page load).
+function nowMs() {
+  const p = new URLSearchParams(location.search).get('now');
+  if (!p) return Date.now();
+  const [d, t] = p.split('T');
+  return zonedToUtc(d, t || '09:00', tz()).getTime() + (Date.now() - BOOT);
+}
+const sessFor = (id) => index.get(id) || (store.journal[id]?.m ? { ...store.journal[id].m, gone: true } : null);
+function jensure(id) {
+  const j = store.journal[id] || (store.journal[id] = { e: [] });
+  const s = index.get(id);
+  if (s && !s.friendOnly && !s.gone) j.m = snapOf(s);
+  return j;
+}
+function jprune(id) {
+  const j = store.journal[id];
+  if (j && !j.e.length && j.a === undefined && !j.r) delete store.journal[id];
+}
+const findEntry = (sid, eid) => store.journal[sid]?.e.find((e) => e.id === eid);
+const photoIds = () => Object.values(store.journal).flatMap((j) => j.e.filter((e) => e.p).map((e) => e.p));
+
+// Entries of a session plus its talks, in time order.
+function timelineFor(id) {
+  const ids = [id, ...(children.get(id) || []).map((k) => k.id)];
+  const out = [];
+  for (const sid of ids) for (const e of store.journal[sid]?.e || []) out.push({ ...e, sid });
+  return out.sort((a, b) => (a.t || 0) - (b.t || 0));
+}
+
+// The talk running right now inside a session (only when it's clearly one talk at a time).
+function liveKid(id, n = now()) {
+  const s = index.get(id);
+  const kids = children.get(id) || [];
+  const live = kids.filter((k) => status(k, n) === 'now');
+  if (!s || live.length !== 1) return null;
+  const k = live[0];
+  return toMin(k.end) - toMin(k.start) < toMin(s.end) - toMin(s.start) ? k : null;
+}
+const defaultKind = (id) => (status(sessFor(id)) === 'future' ? 'q' : 'n');
+
+function addEntry(sid, { k, x = '', p, t }) {
+  const j = jensure(sid);
+  const e = { id: rid(), t: t || nowMs(), k, x };
+  if (p) e.p = p;
+  ui.fresh = e.id;
+  j.e.push(e);
+  markHere(sid);
+  return e;
+}
+// Writing notes during or after a session means you were there (unless you said otherwise).
+function markHere(id) {
+  const s = index.get(id);
+  const j = store.journal[id];
+  if (j && j.a === undefined && s && status(s) !== 'future') j.a = true;
+}
+
+function mergeJournal(src) {
+  for (const [id, bj] of Object.entries(src || {})) {
+    const j = store.journal[id];
+    if (!j) { store.journal[id] = bj; continue; }
+    const have = new Set(j.e.map((e) => e.id));
+    const same = new Set(j.e.map((e) => e.k + e.x));
+    for (const e of bj.e) if (!have.has(e.id) && (e.k === 'p' || !same.has(e.k + e.x))) j.e.push(e);
+    if (j.a === undefined && bj.a !== undefined) j.a = bj.a;
+    if (!j.r && bj.r) j.r = bj.r;
+    if (!j.m && bj.m) j.m = bj.m;
+  }
+}
+
+function notesForICS() {
+  const out = {};
+  for (const [id, j] of Object.entries(store.journal)) {
+    const lines = j.e.filter((e) => e.x).map((e) => `${e.k === 'n' ? '' : `${KINDS[e.k].icon} `}${e.x}`);
+    if (lines.length) out[id] = lines.join('\n');
+  }
+  return out;
+}
+
+const clip = (x, n) => (x.length > n ? `${x.slice(0, n - 1).trimEnd()}…` : x);
+const linkify = (x) => esc(x)
+  .replace(/https?:\/\/[^\s<]+[^\s<.,;:!?)\]]/g, (u) => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`)
+  .replace(/\n/g, '<br>');
+const clockOf = (t) => fmtTime(utcToZoned(new Date(t), tz()).time);
+
+function stampHTML(e, s) {
+  if (!e.t) return '';
+  const z = utcToZoned(new Date(e.t), tz());
+  let rel = '';
+  if (s) {
+    const m = Math.round((e.t - zonedToUtc(s.date, s.start, tz()).getTime()) / 60000);
+    const dur = toMin(s.end) - toMin(s.start);
+    if (z.date !== s.date) rel = dayLabel(z.date).dow;
+    else if (m < 0) rel = 'before';
+    else if (m <= dur + 5) rel = m < 1 ? 'start' : `${fmtDur(m)} in`;
+    else rel = 'after';
+  }
+  return `<time>${fmtTime(z.time)}</time>${rel ? `<small>${rel}</small>` : ''}`;
+}
+
+function entryHTML(e, s) {
+  const check = e.k === 't' || e.k === 'q';
+  const doneWord = e.k === 't' ? 'Done' : 'Asked';
+  const fresh = ui.fresh === e.id ? 'new' : '';
+  return `<li class="entry k-${e.k} ${e.d ? 'done' : ''} ${fresh}" data-sid="${esc(e.sid)}" data-eid="${esc(e.id)}">
+    <div class="estamp">${stampHTML(e, s)}</div>
+    <div class="ebody"><div class="etext" data-act="edit-entry" role="button" tabindex="0">
+      ${check ? `<button class="echeck" data-act="toggle-done" aria-pressed="${!!e.d}" aria-label="${doneWord}">${e.d ? '✓' : ''}</button>` : ''}
+      <div class="ec">
+        ${e.k !== 'n' && e.k !== 'p' ? `<span class="ekind">${KINDS[e.k].icon} ${KINDS[e.k].label}${e.d ? ` · ${doneWord.toLowerCase()}` : ''}</span>` : ''}
+        ${e.p ? `<span class="ph shot"><img data-pid="${esc(e.p)}" data-act="photo" alt="Photo${e.x ? `: ${esc(e.x)}` : ''}"></span>` : ''}
+        ${e.x ? `<p>${linkify(e.x)}</p>` : ''}
+      </div>
+    </div></div>
+  </li>`;
+}
+
+function entriesHTML(id) {
+  const s = sessFor(id);
+  const list = timelineFor(id);
+  if (!list.length) return noteHelp(s);
+  let html = '<ol class="entries">';
+  let lastSub = id;
+  for (const e of list) {
+    if (e.sid !== lastSub) {
+      html += `<li class="subhead">${e.sid === id ? 'Session' : `↳ ${esc(sessFor(e.sid)?.title || 'Talk')}`}</li>`;
+      lastSub = e.sid;
+    }
+    html += entryHTML(e, sessFor(e.sid) || s);
+  }
+  return html + '</ol>';
+}
+
+function noteHelp(s) {
+  const future = status(s) === 'future';
+  return `<div class="nempty">
+    <p class="big">${future ? 'Get ready for this one' : 'Capture this talk'}</p>
+    <p class="hint">${future ? 'Write down what you want to ask or look for. Your questions will be waiting when it starts.' : 'Type below. Every note gets a time stamp, like “12m in”, so you can match it to the recording or slides later.'}</p>
+    <ul class="tips">
+      <li class="k-i"><b>💡</b><span><b>Takeaways</b> appear first in your notebook.</span></li>
+      <li class="k-q"><b>❓</b><span><b>Questions</b> get a checkbox. Tick it once you’ve asked.</span></li>
+      <li class="k-t"><b>☐</b><span><b>To-dos</b> from every talk (papers to read, people to email) are collected in one list.</span></li>
+      <li class="k-p"><b>📷</b><span><b>Slide photos</b> are saved with the note, on this phone only.</span></li>
+    </ul>
+    <p class="hint">Shortcuts: start a note with <kbd>!</kbd> for a takeaway, <kbd>?</kbd> for a question, or <kbd>[]</kbd> for a to-do.</p>
+  </div>`;
+}
+
+function noteState(id) {
+  const s = sessFor(id);
+  const j = store.journal[id] || {};
+  const stt = status(s);
+  if (stt === 'future') return '';
+  return `<div class="seg att" role="group" aria-label="Did you attend?">
+      <button data-att="1" class="${j.a === true ? 'on' : ''}" aria-pressed="${j.a === true}">✓ ${stt === 'now' ? 'I’m here' : 'Attended'}</button>
+      <button data-att="0" class="${j.a === false ? 'on' : ''}" aria-pressed="${j.a === false}">Skipped</button>
+    </div>
+    <div class="rate" role="group" aria-label="Rating">${[1, 2, 3, 4, 5].map((i) => `<button data-rate="${i}" class="${i <= (j.r || 0) ? 'on' : ''}" aria-label="${i} of 5">★</button>`).join('')}<span>${RATE[j.r || 0]}</span></div>`;
+}
+
+function liveHTML(s, n = now()) {
+  if (status(s, n) !== 'now') return '';
+  const dur = toMin(s.end) - toMin(s.start);
+  const pct = Math.min(100, Math.max(2, Math.round(((n.min - toMin(s.start)) / dur) * 100)));
+  return `<div class="nlive"><div class="bar"><i style="width:${pct}%"></i></div><span><b>● Live</b> · ${fmtDur(toMin(s.end) - n.min)} left</span></div>`;
+}
+
+function composerHTML(id) {
+  const k = ui.kind || defaultKind(id);
+  const kid = liveKid(id);
+  return `<form id="composer" class="composer" data-id="${esc(id)}" autocomplete="off">
+    <div class="cin">
+      ${kid ? `<p class="ctalk">↳ Now: <b>${esc(kid.title)}</b></p>` : ''}
+      <div class="kinds" role="radiogroup" aria-label="Kind of note">${['n', 'i', 'q', 't'].map((key) => `<button type="button" role="radio" aria-checked="${key === k}" class="kind k-${key} ${key === k ? 'on' : ''}" data-kind="${key}">${KINDS[key].icon} ${KINDS[key].label}</button>`).join('')}</div>
+      <div class="crow">
+        ${photosSupported() ? '<label class="cam" aria-label="Add a photo">📷<input type="file" id="photoin" accept="image/*" multiple hidden></label>' : ''}
+        <textarea id="ctext" rows="1" placeholder="${esc(KINDS[k].ph)}" enterkeyhint="send" autocapitalize="sentences">${esc(store.drafts[id] || '')}</textarea>
+        <button class="send" type="submit" aria-label="Add note">↑</button>
+      </div>
+    </div>
+  </form>`;
+}
+
+function viewNote(id) {
+  const s = sessFor(id);
+  if (!s) return '<div class="empty"><p>That session isn’t available.</p><p><a class="btn" href="#/notes">Back to notes</a></p></div>';
+  const par = s.parent && index.get(s.parent);
+  return `<div class="nbar t-${s.type}">
+      <button class="nback" data-act="note-back" aria-label="Back">‹</button>
+      <span class="nbt">${esc(s.title)}</span>
+      <button class="nshare" data-act="note-share">Share</button>
+    </div>
+    <header class="nhead t-${s.type}">
+      <span class="type">${esc(s.cat || TYPES[s.type] || 'Other')}</span>
+      <h1>${esc(s.title)}</h1>
+      <p class="nmeta">${esc(dayLabel(s.date).dow)} ${fmtTime(s.start)}–${fmtTime(s.end)}${s.room ? ` · <span class="room">📍 ${esc(s.room)}</span>` : ''}</p>
+      ${s.speakers ? `<p class="nmeta who">${esc(s.speakers)}</p>` : ''}
+      ${par ? `<p class="nmeta">in <a href="${noteHref(par.id)}">${esc(par.title)}</a></p>` : ''}
+      ${index.has(id) ? `<button class="link" data-open="${esc(id)}">Session details</button>` : ''}
+      <div id="nlive">${liveHTML(s)}</div>
+      <div class="nstate" id="nstate">${noteState(id)}</div>
+    </header>
+    <div id="entries">${entriesHTML(id)}</div>
+    ${composerHTML(id)}`;
+}
+
+function refreshNote(id, { scroll = false } = {}) {
+  const el = $('#entries');
+  if (!el) return;
+  el.innerHTML = entriesHTML(id);
+  ui.fresh = null;
+  hydratePhotos(el);
+  $('#nstate').innerHTML = noteState(id);
+  $('#nlive').innerHTML = liveHTML(sessFor(id));
+  if (scroll) requestAnimationFrame(() => window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' }));
+}
+function afterJournalChange() {
+  const r = route();
+  if (r.name === 'note') refreshNote(decodeURIComponent(r.arg || ''));
+  else render();
+}
+
+function autosize(ta) {
+  if (!ta) return;
+  ta.style.height = 'auto';
+  ta.style.height = `${Math.min(ta.scrollHeight + 2, innerHeight * 0.38)}px`;
+}
+function updateKinds(id) {
+  const k = ui.kind || defaultKind(id);
+  $$('#composer [data-kind]').forEach((b) => {
+    b.classList.toggle('on', b.dataset.kind === k);
+    b.setAttribute('aria-checked', b.dataset.kind === k);
+  });
+  const ta = $('#ctext');
+  if (ta) ta.placeholder = KINDS[k].ph;
+}
+
+function submitComposer(form) {
+  const id = form.dataset.id;
+  const ta = $('#ctext');
+  let x = ta.value.trim();
+  if (!x) { ta.focus(); return; }
+  let k = ui.kind || defaultKind(id);
+  const m = x.match(/^(!|\?|\[ ?\])\s*/);
+  if (m && x.length > m[0].length) {
+    k = m[1] === '!' ? 'i' : m[1] === '?' ? 'q' : 't';
+    x = x.slice(m[0].length);
+  }
+  const kid = liveKid(id);
+  addEntry(kid ? kid.id : id, { k, x });
+  if (kid) { jensure(id); markHere(id); }
+  ta.value = '';
+  delete store.drafts[id];
+  save();
+  autosize(ta);
+  ui.kind = null; // back to plain notes, so one takeaway doesn't turn every later note into one
+  updateKinds(id);
+  refreshNote(id, { scroll: true });
+  ta.focus();
+}
+
+async function addPhotos(id, files) {
+  if (!files.length) return;
+  const kid = liveKid(id);
+  const sid = kid ? kid.id : id;
+  const ta = $('#ctext');
+  let cap = ta?.value.trim() || '';
+  toast(`📷 Saving ${files.length > 1 ? `${files.length} photos` : 'photo'}…`);
+  let ok = 0;
+  for (const f of files) {
+    try {
+      const { full, thumb } = await makePhoto(f);
+      const pid = `p${rid()}`;
+      // Photos picked from the camera roll keep the time they were taken.
+      const t = f.lastModified && Math.abs(Date.now() - f.lastModified) > 120_000 ? f.lastModified : nowMs();
+      await putPhoto({ id: pid, sid, t, full, thumb });
+      addEntry(sid, { k: 'p', x: cap, p: pid, t });
+      cap = '';
+      ok++;
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  if (ok && ta?.value.trim()) { ta.value = ''; delete store.drafts[id]; autosize(ta); }
+  if (kid) { jensure(id); markHere(id); }
+  save();
+  toast(ok ? `📷 ${ok === 1 ? 'Photo' : `${ok} photos`} added` : '⚠️ Could not save that photo');
+  if (route().name === 'note') refreshNote(id, { scroll: true });
+}
+
+function openEntryEditor(sid, eid) {
+  const e = findEntry(sid, eid);
+  if (!e) return;
+  ui.editing = { sid, eid, k: e.k };
+  const sheet = $('#sheet');
+  sheet.innerHTML = `<div class="sheet editor k-${e.k}">
+    <button class="x" data-act="close" aria-label="Close">✕</button>
+    <span class="type">${e.k === 'p' ? 'Photo' : 'Edit note'}${e.t ? ` · ${clockOf(e.t)}` : ''}</span>
+    <h2>${esc(clip(sessFor(sid)?.title || '', 70))}</h2>
+    ${e.p ? `<span class="ph big"><img data-pid="${esc(e.p)}" data-size="full" alt=""></span>` : ''}
+    ${e.k !== 'p' ? `<div class="kinds">${['n', 'i', 'q', 't'].map((key) => `<button type="button" class="kind k-${key} ${key === e.k ? 'on' : ''}" data-ekind="${key}">${KINDS[key].icon} ${KINDS[key].label}</button>`).join('')}</div>` : ''}
+    <textarea id="etext" rows="5" placeholder="${e.k === 'p' ? 'Add a caption…' : ''}">${esc(e.x)}</textarea>
+    <div class="row wrap actions">
+      <button class="btn danger ghost" data-act="del-entry">Delete</button>
+      ${e.p ? '<button class="btn ghost" data-act="photo-save">Save to phone</button>' : ''}
+      <span class="grow"></span>
+      <button class="btn primary" data-act="save-entry">Save</button>
+    </div>
+  </div>`;
+  if (!sheet.open) sheet.showModal();
+  hydratePhotos(sheet);
+}
+
+async function savePhotoOut(pid) {
+  const rec = await getPhoto(pid).catch(() => null);
+  if (!rec) return toast('That photo isn’t on this device');
+  const name = `${(sessFor(rec.sid)?.title || 'photo').slice(0, 40).replace(/[^\w]+/g, '-')}.jpg`;
+  const file = new File([rec.full], name, { type: 'image/jpeg' });
+  if (navigator.canShare?.({ files: [file] })) {
+    navigator.share({ files: [file] }).catch(() => {});
+  } else {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(rec.full);
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+}
+
+function deleteEntry(sid, eid) {
+  const j = store.journal[sid];
+  const i = j?.e.findIndex((e) => e.id === eid);
+  if (!j || i < 0) return;
+  const [e] = j.e.splice(i, 1);
+  jprune(sid);
+  save();
+  closeSheet();
+  afterJournalChange();
+  let undone = false;
+  toast(e.k === 'p' ? 'Photo deleted' : 'Note deleted', () => {
+    undone = true;
+    const jj = jensure(sid);
+    jj.e.push(e);
+    save();
+    afterJournalChange();
+  });
+  if (e.p) setTimeout(() => { if (!undone) deletePhoto(e.p).catch(() => {}); }, 4000);
+}
+
+// Plain text / Markdown for trip reports.
+function notesMarkdown(only) {
+  const items = journalItems()
+    .filter((x) => !only || x.id === only || x.s.parent === only)
+    .sort((a, b) => sortByTime(a.s, b.s));
+  const who = store.settings.name;
+  let out = only ? '' : `# ${conf().name || 'Conference'} notes${who ? ` · ${who}` : ''}\n`;
+  let day = null;
+  for (const { s, j, es } of items) {
+    if (!only && s.date !== day) { out += `\n## ${dayLabel(s.date, true)}\n`; day = s.date; }
+    out += `\n### ${only ? '' : `${fmtTime(s.start)} · `}${s.title}\n`;
+    const meta = [
+      only && `${dayLabel(s.date, true)}, ${fmtTime(s.start)}`, s.room && `📍 ${s.room}`, s.speakers,
+      j.r && `${'★'.repeat(j.r)}${'☆'.repeat(5 - j.r)}`, j.a === false && 'Skipped',
+    ].filter(Boolean);
+    if (meta.length) out += `${meta.join(' · ')}\n`;
+    const by = (k) => es.filter((e) => e.k === k);
+    const line = (x) => x.replace(/\n/g, '\n  ');
+    const sec = (title, list, fmt) => { if (list.length) out += `\n**${title}**\n${list.map(fmt).join('\n')}\n`; };
+    sec('Key takeaways', by('i'), (e) => `- ${line(e.x)}`);
+    sec('Notes', [...by('n'), ...by('p').filter((e) => e.x)], (e) => `- ${e.k === 'p' ? '📷 ' : ''}${line(e.x)}`);
+    sec('Questions', by('q'), (e) => `- [${e.d ? 'x' : ' '}] ${line(e.x)}`);
+    sec('Follow-ups', by('t'), (e) => `- [${e.d ? 'x' : ' '}] ${line(e.x)}`);
+    const ph = by('p').length;
+    if (ph) out += `\n_${ph} photo${ph === 1 ? '' : 's'} saved on my phone_\n`;
+  }
+  return `${out.trim()}\n`;
+}
+
+// Sessions that belong in the notebook: anything with notes, a rating, or marked attended.
+// Talks roll up into their session's card when that session is in the notebook too.
+function journalItems() {
+  const out = [];
+  for (const [id, j] of Object.entries(store.journal)) {
+    if (!j.e.length && j.a !== true && !j.r) continue;
+    const s = sessFor(id);
+    if (s) out.push({ id, j, s });
+  }
+  const ids = new Set(out.map((x) => x.id));
+  return out.filter((x) => !(x.s.parent && ids.has(x.s.parent))).map((x) => ({ ...x, es: timelineFor(x.id) }));
+}
+
+function jcard({ id, j, s, es }) {
+  const by = (k) => es.filter((e) => e.k === k);
+  const take = by('i'), notes = by('n'), photos = by('p'), qs = by('q'), ts = by('t');
+  const par = s.parent && index.get(s.parent);
+  const lead = take.length
+    ? take.slice(0, 3).map((e) => `<li class="k-i">💡 ${esc(clip(e.x, 220))}</li>`)
+    : notes.slice(0, 2).map((e) => `<li>${esc(clip(e.x, 160))}</li>`);
+  const foot = [
+    notes.length && `✎ ${notes.length}`, take.length && `💡 ${take.length}`, qs.length && `❓ ${qs.length}`,
+    ts.length && `☐ ${ts.filter((e) => !e.d).length ? `${ts.filter((e) => !e.d).length} open` : 'all done'}`,
+    photos.length && `📷 ${photos.length}`,
+  ].filter(Boolean);
+  return `<a class="jcard t-${s.type}" href="${noteHref(id)}">
+    <div class="jtop"><span>${fmtTime(s.start)}</span>${j.a === true ? '<span class="jatt">✓ Attended</span>' : j.a === false ? '<span class="jatt no">Skipped</span>' : ''}${j.r ? `<span class="jstars" aria-label="Rated ${j.r} of 5">${'★'.repeat(j.r)}<i>${'★'.repeat(5 - j.r)}</i></span>` : ''}</div>
+    <h3>${esc(s.title)}</h3>
+    <p class="meta">${[s.room && `<span class="room">📍 ${esc(s.room)}</span>`, esc(s.cat || TYPES[s.type] || '')].filter(Boolean).join('<i>·</i>')}</p>
+    ${par ? `<p class="parent">in ${esc(par.title)}</p>` : ''}
+    ${lead.length ? `<ul class="jlead">${lead.join('')}</ul>` : ''}
+    ${photos.length ? `<div class="jphotos">${photos.slice(0, 4).map((e) => `<span class="ph"><img data-pid="${esc(e.p)}" alt=""></span>`).join('')}${photos.length > 4 ? `<span class="ph more">+${photos.length - 4}</span>` : ''}</div>` : ''}
+    <p class="jfoot">${foot.length ? foot.join('<i>·</i>') : '<span>No notes yet. Tap to add takeaways or a rating.</span>'}</p>
+  </a>`;
+}
+
+function viewNotes() {
+  const n = now();
+  const f = ui.nf || 'all';
+  const q = (ui.nq || '').trim().toLowerCase();
+  let items = journalItems();
+  const all = items.flatMap(({ s, es }) => es.map((e) => ({ ...e, s })));
+  const count = (k) => all.filter((e) => e.k === k).length;
+  const open = all.filter((e) => e.k === 't' && !e.d).length;
+  const attended = items.filter((x) => x.j.a === true).length;
+  const tile = (key, num, label, icon) => `<button class="stat k-${key} ${f === key ? 'on' : ''}" data-nf="${key}" aria-pressed="${f === key}"><i>${icon}</i><b>${num}</b><span>${label}</span></button>`;
+
+  let html = `<div class="jhead">
+    <h1>My notes</h1>
+    <p>${attended} attended · ${all.filter((e) => e.k !== 'p').length} notes · ${count('p')} photos</p>
+    <div class="stats">
+      ${tile('all', items.length, 'Sessions', '▤')}${tile('i', count('i'), 'Takeaways', '💡')}${tile('q', count('q'), 'Questions', '❓')}${tile('t', open, 'To do', '☐')}${tile('p', count('p'), 'Photos', '📷')}
+    </div>
+    ${items.length ? `<div class="search"><input id="nq" type="search" placeholder="Search your notes…" value="${esc(ui.nq || '')}" autocomplete="off" enterkeyhint="search"></div>` : ''}
+  </div>`;
+
+  // Starred sessions that ended without a yes/no: one tap each.
+  const ask = f === 'all' && !q ? mySessions()
+    .filter((s) => status(s, n) === 'past' && !isBackground(s) && !s.parent && store.journal[s.id]?.a === undefined && !store.journal[s.id]?.e.length)
+    .sort((a, b) => sortByTime(b, a)) : [];
+  if (ask.length) {
+    html += `<section class="ask"><h2>Did you go?</h2><p class="hint">Starred sessions that have ended. Mark the ones you went to so they show up here.</p><ul>
+      ${ask.slice(0, ui.askAll ? 60 : 3).map((s) => `<li><div><b>${esc(s.title)}</b><small>${esc(dayLabel(s.date).dow)} ${fmtTime(s.start)}${s.room ? ` · ${esc(s.room)}` : ''}</small></div>
+        <button class="btn sm" data-went="${esc(s.id)}" data-v="1">✓ Went</button><button class="btn sm ghost" data-went="${esc(s.id)}" data-v="0">Skipped</button></li>`).join('')}
+    </ul>${ask.length > 3 && !ui.askAll ? `<button class="link" data-act="ask-all">Show all ${ask.length}</button>` : ''}</section>`;
+  }
+
+  if (!items.length) {
+    return html + `<div class="empty jempty">
+      <p class="big">✎</p>
+      <p><b>Your conference notebook</b></p>
+      <p>At a talk, tap <b>✎ Notes</b> on the “Now” card in My Schedule, or open any session and tap <b>Take notes</b>.</p>
+      <p class="hint">Takeaways, questions, follow-ups and slide photos from every session you attend collect here, sorted by day.</p>
+      <p><a class="btn primary" href="#/my">Go to My Schedule</a></p>
+    </div>`;
+  }
+
+  const terms = q ? q.split(/\s+/) : [];
+  const hit = (txt) => terms.every((t) => txt.toLowerCase().includes(t));
+  const newestFirst = (a, b) => b.s.date.localeCompare(a.s.date) || sortByTime(a.s, b.s);
+
+  if (f === 'all') {
+    if (q) items = items.filter((x) => hit(`${x.s.title} ${x.s.speakers || ''} ${x.s.room || ''} ${x.es.map((e) => e.x).join(' ')}`));
+    items.sort(newestFirst);
+    if (!items.length) return html + '<div class="empty"><p>No notes match.</p></div>';
+    let day = null;
+    for (const it of items) {
+      if (it.s.date !== day) {
+        html += `${day ? '</div>' : ''}<h2 class="dayhead">${it.s.date === n.date ? 'Today · ' : ''}${esc(dayLabel(it.s.date, true))}</h2><div class="list">`;
+        day = it.s.date;
+      }
+      html += jcard(it);
+    }
+    html += '</div>';
+  } else {
+    // One kind across every session, grouped by session.
+    const groups = items.map((it) => ({
+      ...it,
+      list: it.es.filter((e) => e.k === f && (!q || hit(`${e.x} ${it.s.title}`)))
+        .sort((a, b) => (f === 't' || f === 'q' ? (a.d || 0) - (b.d || 0) : 0) || (a.t || 0) - (b.t || 0)),
+    })).filter((g) => g.list.length).sort(newestFirst);
+    if (f === 't') groups.sort((a, b) => +!a.list.some((e) => !e.d) - +!b.list.some((e) => !e.d));
+    if (!groups.length) {
+      const what = { i: 'takeaways', q: 'questions', t: 'to-dos', p: 'photos' }[f];
+      return html + `<div class="empty"><p>${q ? `No ${what} match.` : `No ${what} yet.`}</p><p class="hint">${f === 'p' ? 'Use the 📷 button while taking notes to save slides.' : `Pick <b>${KINDS[f].icon} ${KINDS[f].label}</b> above the note box, or start a note with <kbd>${f === 'i' ? '!' : f === 'q' ? '?' : '[]'}</kbd>.`}</p></div>`;
+    }
+    for (const g of groups) {
+      const head = `<a class="jgtitle" href="${noteHref(g.id)}"><b>${esc(g.s.title)}</b><small>${esc(dayLabel(g.s.date).dow)} ${fmtTime(g.s.start)}${g.s.room ? ` · ${esc(g.s.room)}` : ''} ›</small></a>`;
+      if (f === 'p') {
+        html += `<section class="jgroup t-${g.s.type}">${head}<div class="pgrid">${g.list.map((e) => `<button class="ph" data-act="photo" data-sid="${esc(e.sid)}" data-eid="${esc(e.id)}" aria-label="Photo${e.x ? `: ${esc(e.x)}` : ''}"><img data-pid="${esc(e.p)}" alt=""></button>`).join('')}</div></section>`;
+      } else {
+        html += `<section class="jgroup t-${g.s.type}">${head}<ol class="entries compact">${g.list.map((e) => entryHTML(e, g.s)).join('')}</ol></section>`;
+      }
+    }
+  }
+
+  html += `<section class="jexport">
+    <h2>Take your notes with you</h2>
+    <p class="hint">Get everything as tidy text for a trip report, an email or a doc. Photos stay on this phone; save one by tapping it.</p>
+    <div class="row wrap">
+      <button class="btn" data-act="notes-copy">📋 Copy all</button>
+      ${navigator.share ? '<button class="btn" data-act="notes-share">📤 Share</button>' : ''}
+      <button class="btn" data-act="notes-md">⬇️ Download .md</button>
+    </div>
+  </section>`;
+  return html;
+}
+
+function noteBox(id, s) {
+  const list = timelineFor(id);
+  const stt = status(s);
+  if (!list.length) {
+    return `<a class="notebtn" href="${noteHref(id)}"><span>✎</span><b>${stt === 'future' ? 'Prep questions' : stt === 'now' ? 'Take notes now' : 'Add notes'}</b>
+      <small>${stt === 'future' ? 'Write down what you want to ask' : 'Takeaways, questions, follow-ups, slide photos'}</small></a>`;
+  }
+  const ph = list.filter((e) => e.k === 'p').length;
+  const tx = list.filter((e) => e.k !== 'p');
+  const preview = [...tx.filter((e) => e.k === 'i'), ...tx.filter((e) => e.k !== 'i').reverse()].slice(0, 3);
+  return `<a class="notebox" href="${noteHref(id)}">
+    <div class="nbh"><b>✎ My notes</b><span>${tx.length ? `${tx.length} note${tx.length === 1 ? '' : 's'}` : ''}${tx.length && ph ? ' · ' : ''}${ph ? `${ph} photo${ph === 1 ? '' : 's'}` : ''} ›</span></div>
+    ${preview.length ? `<ul>${preview.map((e) => `<li class="k-${e.k}">${e.k === 'n' ? '' : `${KINDS[e.k].icon} `}${esc(clip(e.x, 140))}</li>`).join('')}</ul>` : ''}
+  </a>`;
+}
+
+// Photos whose note was deleted (or after "Clear my data") are removed from the device.
+async function gcPhotos() {
+  if (!photosSupported()) return;
+  try {
+    const keep = new Set(photoIds());
+    for (const k of await allPhotoKeys()) if (!keep.has(k)) await deletePhoto(k);
+  } catch { /* ignore */ }
+}
+
+// ------------------------------------------------------------------
 // Detail sheet
 // ------------------------------------------------------------------
 // Full details (descriptions, people, chairs, passes) live in data/details.json,
@@ -693,6 +1290,7 @@ function openDetail(id, { keepStack = false, keepScroll = false } = {}) {
       ${navigator.share ? '<button class="btn" data-act="share1">Share</button>' : ''}
       ${s.mine && !ro ? `<a class="btn ghost" href="#/edit/${encodeURIComponent(id)}">Edit</a>` : ''}
     </div>
+    ${ro ? '' : noteBox(id, s)}
     <div class="facts">
       ${d.reg ? `<span class="fact">🎫 ${d.reg.map(esc).join(' · ')}</span>` : ''}
       ${d.rec ? `<span class="fact">🎥 ${esc(d.rec)}</span>` : ''}
@@ -708,7 +1306,6 @@ function openDetail(id, { keepStack = false, keepScroll = false } = {}) {
       const ks = starred().has(k.id);
       return `<div class="talk ${ks && !ro ? 'starred' : ''} ${ro ? 'ro' : ''}" data-open="${esc(k.id)}"><span class="tt">${fmtTime(k.start)}<small>${fmtTime(k.end)}</small></span><span class="tn">${esc(k.title)}${k.speakers ? `<small>${esc(k.speakers)}</small>` : ''}</span>${ro ? '' : `<button class="star" data-star="${esc(k.id)}" aria-label="Star talk">${ks ? '★' : '☆'}</button>`}</div>`;
     }).join('')}</div><p class="hint">Tap a talk for its abstract and speakers.</p>` : ''}
-    <label class="notes" ${ro ? 'hidden' : ''}>My notes<textarea id="note" rows="3" placeholder="Questions to ask, people to meet, takeaways…">${esc(store.notes[id] || '')}</textarea></label>
     ${s.url ? `<p class="center"><a href="${esc(s.url)}" target="_blank" rel="noopener">Open on the official SC26 site ↗</a></p>` : ''}
   </div>`;
   if (!sheet.open) sheet.showModal();
@@ -860,7 +1457,7 @@ function planAsText() {
 function exportICS(list, name) {
   if (!list.length) return toast('Nothing to export');
   list = list.map((x) => ({ ...x, description: fullDesc(x), speakers: x.speakers }));
-  const text = sessionsToICS(list, { tz: tz(), name: `${conf().name || ''} schedule`, notes: store.notes });
+  const text = sessionsToICS(list, { tz: tz(), name: `${conf().name || ''} schedule`, notes: notesForICS() });
   try {
     const file = new File([text], name, { type: 'text/calendar' });
     if (navigator.canShare?.({ files: [file] })) {
@@ -902,7 +1499,12 @@ function importText(text, filename = '') {
         const keep = store.settings;
         restoreBackup(cleanBackup(j), true);
         store.settings = { ...keep, ...pickSettings(j.settings) };
-        save(); applyTheme(); return render();
+        save(); applyTheme(); render();
+        if (Array.isArray(j.photos) && j.photos.length) {
+          toast(`Restoring ${j.photos.length} photos…`);
+          importPhotos(j.photos).then((n) => { toast(`✅ Restored ${n} photos`); render(); });
+        }
+        return;
       }
       const arr = Array.isArray(j) ? j : j.sessions || [];
       return importSessions(arr.filter((s) => s.title && s.date && s.start), { star });
@@ -944,7 +1546,7 @@ async function refreshMaster(manual = false) {
 }
 
 async function backupLink() {
-  const code = await encodePlan({ v: 1, starred: store.starred, custom: store.custom, notes: store.notes, friends: store.friends, snap: store.snap, name: store.settings.name });
+  const code = await encodePlan({ v: 1, starred: store.starred, custom: store.custom, journal: store.journal, friends: store.friends, snap: store.snap, name: store.settings.name });
   return `${location.origin}${location.pathname}#restore=${code}`;
 }
 
@@ -960,7 +1562,7 @@ async function handleShareHash(src = location.hash) {
         <button class="x" data-act="close" aria-label="Close">✕</button>
         <span class="type">Backup</span>
         <h2>Restore your schedule?</h2>
-        <p>${b.starred.length} starred · ${b.custom.length} own events · ${Object.keys(b.notes).length} notes · ${b.friends.length} friends</p>
+        <p>${b.starred.length} starred · ${b.custom.length} own events · notes on ${Object.keys(b.journal).length} sessions · ${b.friends.length} friends</p>
         <p class="hint">“Merge” keeps what’s already on this device and adds the backup.</p>
         <div class="row wrap actions">
           <button class="btn primary" data-act="restore-merge">Merge into this device</button>
@@ -1028,7 +1630,7 @@ function restoreBackup(b, replace) {
   const ids = new Set(store.custom.map((x) => x.id));
   for (const c of b.custom) if (!ids.has(c.id)) store.custom.push(c);
   store.starred = [...new Set([...store.starred, ...b.starred])];
-  store.notes = { ...b.notes, ...store.notes };
+  mergeJournal(b.journal);
   for (const f of b.friends) if (!store.friends.some((x) => x.name === f.name)) store.friends.push(f);
   if (b.name && !store.settings.name) store.settings.name = b.name;
   store.snap = { ...b.snap, ...(store.snap || {}) };
@@ -1064,28 +1666,39 @@ function mergeIds(ids, custom = []) {
 function route() {
   const h = location.hash.replace(/^#\/?/, '');
   const [name, arg] = h.split('/');
-  return { name: ['my', 'all', 'add', 'edit', 'more'].includes(name) ? name : 'my', arg };
+  return { name: ['my', 'all', 'add', 'edit', 'more', 'note', 'notes'].includes(name) ? name : 'my', arg };
 }
 
 function render() {
   const r = route();
   const view = $('#view');
   document.body.classList.toggle('shared', !!ui.shared);
+  document.body.classList.toggle('focus', !ui.shared && r.name === 'note');
   if (ui.shared) {
     $('#days').hidden = true;
     view.innerHTML = viewShared();
     document.title = `${ui.shared.n ? `${ui.shared.n}’s ` : ''}${conf().name || ''} schedule`;
     return;
   }
-  const focusedSearch = document.activeElement?.id === 'q';
-  const caret = focusedSearch ? document.activeElement.selectionStart : 0;
+  const focusedId = ['q', 'nq'].includes(document.activeElement?.id) ? document.activeElement.id : null;
+  const caret = focusedId ? document.activeElement.selectionStart : 0;
   renderDays();
-  $$('.tabs a').forEach((a) => a.classList.toggle('on', a.dataset.tab === (r.name === 'edit' ? 'add' : r.name)));
+  const tab = { edit: 'add', note: 'notes' }[r.name] || r.name;
+  $$('.tabs a').forEach((a) => a.classList.toggle('on', a.dataset.tab === tab));
   if (r.name === 'my') view.innerHTML = viewMy();
   else if (r.name === 'all') view.innerHTML = viewAll();
   else if (r.name === 'add') view.innerHTML = viewAdd();
   else if (r.name === 'edit') view.innerHTML = viewAdd(decodeURIComponent(r.arg || ''));
-  else if (r.name === 'more') {
+  else if (r.name === 'note') {
+    const id = decodeURIComponent(r.arg || '');
+    if (ui.kindFor !== id) { ui.kindFor = id; ui.kind = null; }
+    view.innerHTML = viewNote(id);
+    hydratePhotos(view);
+    autosize($('#ctext'));
+  } else if (r.name === 'notes') {
+    view.innerHTML = viewNotes();
+    hydratePhotos(view);
+  } else if (r.name === 'more') {
     view.innerHTML = viewMore();
     navigator.storage?.persisted?.().then((p) => {
       const el = $('#persistinfo');
@@ -1093,8 +1706,8 @@ function render() {
     });
   }
   document.title = `${conf().name || 'Conference'} Planner`;
-  const q = $('#q');
-  if (focusedSearch && q) {
+  const q = focusedId && $(`#${focusedId}`);
+  if (q) {
     q.focus();
     q.setSelectionRange(caret, caret);
   }
@@ -1109,6 +1722,57 @@ function applyTheme() {
 // ------------------------------------------------------------------
 document.addEventListener('click', async (e) => {
   const t = e.target;
+
+  // Links inside notes open normally instead of starting an edit.
+  if (t.closest('.etext a')) return;
+  // A link to the page we're already on (e.g. "My notes" in a details sheet) just closes the sheet.
+  const selfLink = t.closest('a[href^="#/"]');
+  if (selfLink && selfLink.getAttribute('href') === location.hash) { e.preventDefault(); closeSheet(); return; }
+
+  const kindBtn = t.closest('[data-kind]');
+  if (kindBtn) {
+    const id = kindBtn.closest('form').dataset.id;
+    ui.kind = kindBtn.dataset.kind === defaultKind(id) ? null : kindBtn.dataset.kind;
+    updateKinds(id);
+    $('#ctext')?.focus();
+    return;
+  }
+  const ekind = t.closest('[data-ekind]');
+  if (ekind) {
+    ui.editing.k = ekind.dataset.ekind;
+    $$('[data-ekind]').forEach((b) => b.classList.toggle('on', b === ekind));
+    ekind.closest('.sheet').className = `sheet editor k-${ui.editing.k}`;
+    return;
+  }
+  const att = t.closest('[data-att]');
+  if (att) {
+    const id = decodeURIComponent(route().arg || '');
+    const j = jensure(id);
+    const v = att.dataset.att === '1';
+    if (j.a === v) delete j.a; else j.a = v;
+    jprune(id); save(); refreshNote(id);
+    return;
+  }
+  const rate = t.closest('[data-rate]');
+  if (rate) {
+    const id = decodeURIComponent(route().arg || '');
+    const j = jensure(id);
+    const r = +rate.dataset.rate;
+    if (j.r === r) delete j.r; else j.r = r;
+    if (j.r && j.a === undefined) j.a = true;
+    jprune(id); save(); refreshNote(id);
+    return;
+  }
+  const went = t.closest('[data-went]');
+  if (went) {
+    const id = went.dataset.went;
+    jensure(id).a = went.dataset.v === '1';
+    save(); render();
+    toast(went.dataset.v === '1' ? '✓ Marked as attended' : 'Marked as skipped', () => { delete store.journal[id].a; jprune(id); save(); render(); });
+    return;
+  }
+  const nf = t.closest('[data-nf]');
+  if (nf) { ui.nf = nf.dataset.nf === ui.nf ? 'all' : nf.dataset.nf; render(); return; }
 
   const day = t.closest('[data-day]');
   if (day) { ui.day = day.dataset.day; render(); window.scrollTo({ top: 0 }); return; }
@@ -1152,6 +1816,51 @@ document.addEventListener('click', async (e) => {
     const sheetId = t.closest('.sheet')?.dataset.id;
     switch (act) {
       case 'close': closeSheet(); return;
+      case 'note-back':
+        if (ui.navs > 0) history.back(); else location.hash = '#/notes';
+        return;
+      case 'note-share': {
+        const id = decodeURIComponent(route().arg || '');
+        const s = sessFor(id);
+        if (!timelineFor(id).length) { toast('No notes to share yet'); return; }
+        shareOrCopy({ title: s.title, text: notesMarkdown(id) });
+        return;
+      }
+      case 'edit-entry': case 'toggle-done': case 'photo': {
+        const el = t.closest('[data-eid]');
+        const en = el && findEntry(el.dataset.sid, el.dataset.eid);
+        if (!en) return;
+        if (act === 'toggle-done') {
+          if (en.d) delete en.d; else en.d = 1;
+          save(); afterJournalChange();
+          if (en.d) toast(en.k === 't' ? '✓ Done' : '✓ Asked');
+        } else {
+          openEntryEditor(el.dataset.sid, el.dataset.eid);
+        }
+        return;
+      }
+      case 'save-entry': {
+        const { sid, eid, k } = ui.editing || {};
+        const en = findEntry(sid, eid);
+        if (!en) { closeSheet(); return; }
+        const x = $('#etext').value.trim();
+        if (!x && en.k !== 'p') { deleteEntry(sid, eid); return; }
+        en.x = x;
+        if (en.k !== 'p') en.k = k;
+        if (en.k !== 't' && en.k !== 'q') delete en.d;
+        save(); closeSheet(); afterJournalChange();
+        return;
+      }
+      case 'del-entry': {
+        const { sid, eid } = ui.editing || {};
+        deleteEntry(sid, eid);
+        return;
+      }
+      case 'photo-save': savePhotoOut(findEntry(ui.editing.sid, ui.editing.eid)?.p); return;
+      case 'ask-all': ui.askAll = true; render(); return;
+      case 'notes-copy': copyText(notesMarkdown()); return;
+      case 'notes-share': shareOrCopy({ title: `${conf().name || ''} notes`, text: notesMarkdown() }); return;
+      case 'notes-md': download(`${(conf().name || 'conference').toLowerCase()}-notes.md`, notesMarkdown(), 'text/markdown'); return;
       case 'leave-shared': ui.shared = null; return; // the link navigates to #/my
       case 'keep-shared': {
         const i = saveFriend(ui.shared, ui.shared.n);
@@ -1200,7 +1909,13 @@ document.addEventListener('click', async (e) => {
       case 'dismiss-tip': store.settings.tipDone = true; save(); render(); return;
       case 'copytext': copyText(planAsText()); return;
       case 'ics': exportICS(mySessions(), `${(conf().name || 'conference').toLowerCase()}-my-schedule.ics`); return;
-      case 'backup': download(`${(conf().name || 'conf').toLowerCase()}-planner-backup.json`, JSON.stringify(store, null, 2), 'application/json'); return;
+      case 'backup': {
+        const ids = photoIds();
+        if (ids.length) toast(`Packing ${ids.length} photo${ids.length === 1 ? '' : 's'}…`);
+        const photos = ids.length ? await exportPhotos(ids).catch(() => []) : [];
+        download(`${(conf().name || 'conf').toLowerCase()}-planner-backup.json`, JSON.stringify({ ...store, drafts: {}, photos }), 'application/json');
+        return;
+      }
       case 'reset':
         if (confirm('Clear all your picks, notes, added items and friends on this device?')) { store = defaults(); save(); rebuildIndex(); applyTheme(); render(); toast('Cleared'); }
         return;
@@ -1211,7 +1926,7 @@ document.addEventListener('click', async (e) => {
         if (!confirm('Delete this item?')) return;
         store.custom = store.custom.filter((s) => s.id !== id);
         store.starred = store.starred.filter((x) => x !== id);
-        delete store.notes[id];
+        delete store.journal[id];
         save(); rebuildIndex(); location.hash = '#/my'; toast('Deleted');
         return;
       }
@@ -1243,6 +1958,12 @@ document.addEventListener('click', async (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
+  if (e.target.id === 'ctext' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    submitComposer(e.target.form);
+    return;
+  }
+  if (e.key === 'Enter' && e.target.classList?.contains('etext')) { e.target.click(); return; }
   if (e.key === 'Enter' && e.target.classList?.contains('card')) openDetail(e.target.dataset.id);
   if (e.key === '/' && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) {
     e.preventDefault();
@@ -1251,16 +1972,21 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-let qTimer;
+let qTimer, draftTimer;
 document.addEventListener('input', (e) => {
   const t = e.target;
   if (t.id === 'q') {
     clearTimeout(qTimer);
     qTimer = setTimeout(() => { ui.q = t.value; render(); }, 120);
-  } else if (t.id === 'note') {
-    const id = t.closest('.sheet').dataset.id;
-    if (t.value.trim()) store.notes[id] = t.value; else delete store.notes[id];
-    save();
+  } else if (t.id === 'ctext') {
+    autosize(t);
+    const id = t.form.dataset.id;
+    if (t.value.trim()) store.drafts[id] = t.value; else delete store.drafts[id];
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(save, 400);
+  } else if (t.id === 'nq') {
+    clearTimeout(qTimer);
+    qTimer = setTimeout(() => { ui.nq = t.value; render(); }, 150);
   } else if (t.id === 'myname') {
     store.settings.name = t.value.trim();
     save();
@@ -1275,6 +2001,11 @@ document.addEventListener('input', (e) => {
 document.addEventListener('change', async (e) => {
   const t = e.target;
   if (t.id === 'theme') { store.settings.theme = t.value; save(); applyTheme(); }
+  if (t.id === 'photoin' && t.files.length) {
+    const files = [...t.files];
+    t.value = '';
+    addPhotos(t.form.dataset.id, files);
+  }
   if (t.id === 'importfile' && t.files[0]) {
     const f = t.files[0];
     importText(await f.text(), f.name);
@@ -1283,6 +2014,7 @@ document.addEventListener('change', async (e) => {
 });
 
 document.addEventListener('submit', (e) => {
+  if (e.target.id === 'composer') { e.preventDefault(); submitComposer(e.target); return; }
   if (e.target.id !== 'addform') return;
   e.preventDefault();
   const f = new FormData(e.target);
@@ -1302,7 +2034,9 @@ document.addEventListener('submit', (e) => {
   toast(oldId ? 'Saved' : '★ Added to my schedule');
 });
 
+ui.navs = 0;
 window.addEventListener('hashchange', async () => {
+  ui.navs++;
   if (await handleShareHash()) return;
   ui.shared = null;
   closeSheet();
@@ -1333,11 +2067,16 @@ setInterval(() => {
   if ($('#sheet').open) return;
   if (/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) return;
   if (ui.shared || route().name === 'my') render();
+  else if (route().name === 'note') {
+    const live = $('#nlive');
+    if (live) live.innerHTML = liveHTML(sessFor(decodeURIComponent(route().arg || '')));
+  }
 }, 60_000);
 let lastRefresh = 0;
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
   if (!$('#sheet').open && route().name === 'my') render();
+  if (!$('#sheet').open && route().name === 'note' && !/INPUT|TEXTAREA/.test(document.activeElement?.tagName)) render();
   if (Date.now() - lastRefresh > 10 * 60_000) refreshMaster();
 });
 
@@ -1354,6 +2093,22 @@ if (!openedShared) setTimeout(() => loadDetails(), 300);
 refreshMaster().then(() => {
   // first run with no cache: make sure day/notice are right
   if (!confDays().includes(ui.day)) { ui.day = defaultDay(); render(); }
+});
+
+setTimeout(gcPhotos, 8000);
+
+// Keep the note box sitting right above the on-screen keyboard (iOS doesn't move fixed elements).
+if (window.visualViewport) {
+  const vv = window.visualViewport;
+  const kb = () => document.documentElement.style.setProperty('--kb', `${Math.max(0, Math.round(innerHeight - vv.height - vv.offsetTop))}px`);
+  vv.addEventListener('resize', kb);
+  vv.addEventListener('scroll', kb);
+}
+// Show the session title in the top bar once the big header scrolls away.
+addEventListener('scroll', () => document.body.classList.toggle('scrolled', scrollY > 140), { passive: true });
+// Keep focus in the note box when tapping kind chips / send (so the keyboard stays up).
+document.addEventListener('mousedown', (e) => {
+  if (e.target.closest('#composer button') && document.activeElement?.id === 'ctext') e.preventDefault();
 });
 
 // Casual viewers of a shared link don't need offline caching (saves their data plan).

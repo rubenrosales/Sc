@@ -12,7 +12,12 @@ It's a static site (plain HTML/CSS/JS, no build step) hosted on GitHub Pages.
   - **🔗 Share my schedule** creates a link with your picks. People who open it see your schedule, and your initials show up on the sessions you're going to. They don't need an account, and there's no server.
   - **📋 Copy as text** gives a plain list to paste into Slack, email or a text message.
   - **📅 Calendar (.ics)** exports to Apple, Google or Outlook calendars, with a reminder 10 minutes before each event.
-- **Notes** on any session.
+- **Notes at talks**: tap **✎ Notes** on the "Now" card (or *Take notes* on any session) for a focused note-taking screen:
+  - Each note is time-stamped relative to the talk ("12m in"). If a session has several talks, notes go to whichever talk is on right now.
+  - Note kinds: 💡 **Takeaway**, ❓ **Question** (tick it off once you've asked) and ☐ **To-do**. Shortcuts: start a note with `!`, `?` or `[]`.
+  - 📷 **Slide photos** are shrunk and stored on the phone (IndexedDB).
+  - Mark **Attended / Skipped** and give a **1–5 star rating**. Writing notes during or after a talk marks it attended.
+- **Notes tab**: one clean view of every session you attended or wrote notes on, newest day first, with takeaways at the top of each card. Tap a tile to see all takeaways, questions, open to-dos or photos from the whole conference. Includes search, a "Did you go?" prompt for starred sessions that have ended, and **Copy / Share / Download .md** for trip reports.
 - **Works offline** after the first load. Use *Add to Home Screen* to get an app icon.
 
 All times are Chicago time (the venue's local time), whatever time zone your phone is set to.
@@ -26,8 +31,8 @@ The deploy workflow re-runs it **every 3 hours**, so room and time changes reach
 
 ## Keeping your data (phone only)
 
-- Stars, notes and your own events are saved on the phone, and the app asks the browser to keep that storage persistent.
-- **More → Backup → Copy backup link** gives you one link that holds everything. Paste it into Notes or send it to yourself. Opening it, or pasting it under *More → Open a link*, restores it on any phone.
+- Stars, notes, photos and your own events are saved on the phone, and the app asks the browser to keep that storage persistent.
+- **More → Backup → Copy backup link** gives you one link that holds everything except photos (they're too big for a link). *Download backup file* under Advanced includes the photos. Paste it into Notes or send it to yourself. Opening it, or pasting it under *More → Open a link*, restores it on any phone.
 - On iPhone, the Home Screen app keeps its own storage, separate from Safari. Install it first, or use a backup link to move your stars over.
 - Links that friends send you open in Safari. To open one inside the Home Screen app, paste it under *More → Open a link*.
 

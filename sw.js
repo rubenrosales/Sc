@@ -1,9 +1,9 @@
 // Offline support: app shell is cache-first; schedule data is network-first with cache fallback.
-const VERSION = 'v1';
+const VERSION = 'v2';
 const SHELL = `shell-${VERSION}`;
 const DATA = 'data';
 const ASSETS = [
-  './', 'index.html', 'css/app.css', 'js/app.js', 'js/parsers.js',
+  './', 'index.html', 'css/app.css', 'js/app.js', 'js/parsers.js', 'js/photos.js',
   'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 const DATA_FILES = ['data/schedule.json', 'data/details.json'];
