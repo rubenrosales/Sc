@@ -1,5 +1,5 @@
 // Offline support: app shell is cache-first; schedule data is network-first with cache fallback.
-const VERSION = 'v2';
+const VERSION = 'v1';
 const SHELL = `shell-${VERSION}`;
 const DATA = 'data';
 const ASSETS = [
